@@ -19,7 +19,7 @@ pub fn html_namespace() -> &'static Namespace {
 
 #[inline(always)]
 pub fn is_html_namespace(namespace: &Namespace) -> bool {
-    namespace.as_ref() == HTML_NAMESPACE_URL
+    namespace == html_namespace()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

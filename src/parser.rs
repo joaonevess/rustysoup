@@ -4,15 +4,17 @@ use crate::dom::{
     html_namespace, is_html_namespace, is_raw_text_element, is_void_element,
 };
 use compact_str::CompactString;
-use html5ever::interface::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::interface::tree_builder::{
+    ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink,
+};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::TreeBuilderOpts;
 use html5ever::{Attribute, ParseOpts, QualName, parse_document, parse_fragment};
 use markup5ever::{LocalName, Namespace, local_name, ns};
 use memchr::memchr_iter;
 use std::borrow::Cow;
-use std::cell::{Cell, UnsafeCell};
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell, RefMut};
+use std::collections::HashMap;
 
 pub fn parse_html(html: &str) -> Document {
     if let Some(document) = try_parse_fast_full_document(html) {
@@ -1020,11 +1022,73 @@ fn fast_local_name(name: &str) -> LocalName {
     }
 }
 
+struct SinkState {
+    nodes: Vec<Node>,
+    namespaces: Option<HashMap<NodeId, Namespace>>,
+    template_contents: Vec<(NodeId, NodeId)>,
+}
+
+#[derive(Clone, Debug)]
+struct SinkElementName {
+    namespace: Option<Namespace>,
+    local_name: LocalName,
+}
+
+#[derive(Clone, Debug)]
+struct SinkHandle {
+    id: NodeId,
+    element_name: Option<SinkElementName>,
+    template_contents: Option<NodeId>,
+    mathml_annotation_xml_integration_point: bool,
+}
+
+impl SinkHandle {
+    #[inline(always)]
+    fn node(id: NodeId) -> Self {
+        Self {
+            id,
+            element_name: None,
+            template_contents: None,
+            mathml_annotation_xml_integration_point: false,
+        }
+    }
+}
+
+struct SinkHandleElemName<'a> {
+    handle: &'a SinkHandle,
+    fallback_local_name: &'a LocalName,
+}
+
+impl std::fmt::Debug for SinkHandleElemName<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SinkHandleElemName")
+            .field("ns", self.ns())
+            .field("local", self.local_name())
+            .finish()
+    }
+}
+
+impl ElemName for SinkHandleElemName<'_> {
+    #[inline(always)]
+    fn ns(&self) -> &Namespace {
+        match &self.handle.element_name {
+            Some(name) => name.namespace.as_ref().unwrap_or_else(|| html_namespace()),
+            None => html_namespace(),
+        }
+    }
+
+    #[inline(always)]
+    fn local_name(&self) -> &LocalName {
+        match &self.handle.element_name {
+            Some(name) => &name.local_name,
+            None => self.fallback_local_name,
+        }
+    }
+}
+
 struct Sink {
-    nodes: UnsafeCell<Vec<Node>>,
-    namespaces: UnsafeCell<Option<HashMap<NodeId, Namespace>>>,
-    template_contents: UnsafeCell<Option<HashMap<NodeId, NodeId>>>,
-    mathml_annotation_xml_integration_points: UnsafeCell<Option<HashSet<NodeId>>>,
+    state: RefCell<SinkState>,
     fallback_local_name: LocalName,
     document: NodeId,
     quirks_mode: Cell<QuirksMode>,
@@ -1036,10 +1100,11 @@ impl Sink {
         let mut nodes = Vec::with_capacity(estimated_nodes);
         nodes.push(Node::new(NodeType::Document));
         Self {
-            nodes: UnsafeCell::new(nodes),
-            namespaces: UnsafeCell::new(None),
-            template_contents: UnsafeCell::new(None),
-            mathml_annotation_xml_integration_points: UnsafeCell::new(None),
+            state: RefCell::new(SinkState {
+                nodes,
+                namespaces: None,
+                template_contents: Vec::new(),
+            }),
             fallback_local_name: LocalName::from(Cow::Borrowed("")),
             document: NodeId::new(0),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
@@ -1047,155 +1112,80 @@ impl Sink {
     }
 
     #[inline(always)]
-    fn nodes(&self) -> &Vec<Node> {
-        // SAFETY: html5ever drives TreeSink methods synchronously on one parser thread.
-        // Shared references returned by elem_name are used immediately by the tree
-        // builder; mutations go through separate callbacks after those borrows end.
-        unsafe { &*self.nodes.get() }
+    fn state_mut(&self) -> RefMut<'_, SinkState> {
+        self.state.borrow_mut()
     }
 
     #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    fn nodes_mut(&self) -> &mut Vec<Node> {
-        // SAFETY: the parser never calls into the same Sink concurrently. All DOM
-        // mutations are serialized by html5ever's tree builder, so this interior
-        // mutability avoids RefCell checks without changing aliasing behavior.
-        unsafe { &mut *self.nodes.get() }
-    }
-
-    #[inline(always)]
-    fn namespaces(&self) -> Option<&HashMap<NodeId, Namespace>> {
-        // SAFETY: namespace reads follow the same single-threaded TreeSink access
-        // pattern as node reads. Mutations happen only in create_element callbacks.
-        unsafe { (&*self.namespaces.get()).as_ref() }
-    }
-
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    fn namespaces_mut(&self) -> &mut Option<HashMap<NodeId, Namespace>> {
-        // SAFETY: html5ever drives this sink synchronously, so namespace mutations
-        // are serialized with node mutations.
-        unsafe { &mut *self.namespaces.get() }
-    }
-
-    #[inline(always)]
-    fn namespace(&self, id: NodeId) -> &Namespace {
-        match self.namespaces().and_then(|namespaces| namespaces.get(&id)) {
-            Some(namespace) => namespace,
-            None => html_namespace(),
-        }
-    }
-
-    fn set_namespace(&self, id: NodeId, namespace: Namespace) {
-        if is_html_namespace(&namespace) {
-            return;
-        }
-        self.namespaces_mut()
-            .get_or_insert_with(HashMap::new)
-            .insert(id, namespace);
-    }
-
-    #[inline(always)]
-    fn template_contents(&self) -> Option<&HashMap<NodeId, NodeId>> {
-        // SAFETY: see nodes()/namespaces(); parser callbacks are serialized.
-        unsafe { (&*self.template_contents.get()).as_ref() }
-    }
-
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    fn template_contents_mut(&self) -> &mut Option<HashMap<NodeId, NodeId>> {
-        // SAFETY: see nodes_mut(); parser callbacks are serialized.
-        unsafe { &mut *self.template_contents.get() }
-    }
-
-    fn set_template_contents(&self, id: NodeId, contents: NodeId) {
-        self.template_contents_mut()
-            .get_or_insert_with(HashMap::new)
-            .insert(id, contents);
-    }
-
-    #[inline(always)]
-    fn mathml_annotation_xml_integration_points(&self) -> Option<&HashSet<NodeId>> {
-        // SAFETY: see nodes()/namespaces(); parser callbacks are serialized.
-        unsafe { (&*self.mathml_annotation_xml_integration_points.get()).as_ref() }
-    }
-
-    #[inline(always)]
-    #[allow(clippy::mut_from_ref)]
-    fn mathml_annotation_xml_integration_points_mut(&self) -> &mut Option<HashSet<NodeId>> {
-        // SAFETY: see nodes_mut(); parser callbacks are serialized.
-        unsafe { &mut *self.mathml_annotation_xml_integration_points.get() }
-    }
-
-    fn add_mathml_annotation_xml_integration_point(&self, id: NodeId) {
-        self.mathml_annotation_xml_integration_points_mut()
-            .get_or_insert_with(HashSet::new)
-            .insert(id);
-    }
-
-    fn new_node(&self, node_type: NodeType) -> NodeId {
-        let nodes = self.nodes_mut();
+    fn new_handle(&self, node_type: NodeType) -> SinkHandle {
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
         let id = NodeId::new(nodes.len());
         nodes.push(Node::new(node_type));
-        id
+        SinkHandle::node(id)
     }
 
-    fn append_common(&self, parent: NodeId, child: NodeOrText<NodeId>) {
-        match child {
-            NodeOrText::AppendText(text) => {
-                let nodes = self.nodes_mut();
-                let preserve_whitespace = preserves_whitespace_context(nodes, parent);
-                let text = normalize_text_value(text.as_ref(), preserve_whitespace);
-                if let Some(last_child) = nodes[parent.index()].last_child
-                    && let NodeType::Text(existing) = &mut nodes[last_child.index()].node_type
-                {
-                    append_normalized_text(existing, text.as_ref(), preserve_whitespace);
-                    return;
-                }
-                let child_id = NodeId::new(nodes.len());
-                nodes.push(Node {
-                    node_type: NodeType::Text(CompactString::from(text.as_ref())),
-                    parent: Some(parent),
-                    first_child: None,
-                    last_child: None,
-                    prev_sibling: None,
-                    next_sibling: None,
-                });
-                append_new_attached_leaf(nodes, parent, child_id);
+    fn append_common(&self, parent: NodeId, child: NodeOrText<SinkHandle>) {
+        let mut state = self.state_mut();
+        append_common_to_nodes(&mut state.nodes, parent, child);
+    }
+
+    fn insert_before_common(&self, sibling: NodeId, child: NodeOrText<SinkHandle>) {
+        let mut state = self.state_mut();
+        insert_before_common_to_nodes(&mut state.nodes, sibling, child);
+    }
+}
+
+fn append_common_to_nodes(nodes: &mut Vec<Node>, parent: NodeId, child: NodeOrText<SinkHandle>) {
+    match child {
+        NodeOrText::AppendText(text) => {
+            let preserve_whitespace = preserves_whitespace_context(nodes, parent);
+            let text = normalize_text_value(text.as_ref(), preserve_whitespace);
+            if let Some(last_child) = nodes[parent.index()].last_child
+                && let NodeType::Text(existing) = &mut nodes[last_child.index()].node_type
+            {
+                append_normalized_text(existing, text.as_ref(), preserve_whitespace);
+                return;
             }
-            NodeOrText::AppendNode(child_id) => {
-                let nodes = self.nodes_mut();
-                append_new(nodes, parent, child_id);
-            }
+            let child_id = NodeId::new(nodes.len());
+            nodes.push(Node {
+                node_type: NodeType::Text(CompactString::from(text.as_ref())),
+                parent: Some(parent),
+                first_child: None,
+                last_child: None,
+                prev_sibling: None,
+                next_sibling: None,
+            });
+            append_new_attached_leaf(nodes, parent, child_id);
+        }
+        NodeOrText::AppendNode(child) => {
+            append_new(nodes, parent, child.id);
         }
     }
+}
 
-    fn insert_before_common(&self, sibling: NodeId, child: NodeOrText<NodeId>) {
-        match child {
-            NodeOrText::AppendText(text) => {
-                let nodes = self.nodes_mut();
-                let preserve_whitespace = nodes[sibling.index()]
-                    .parent
-                    .is_some_and(|parent| preserves_whitespace_context(nodes, parent));
-                let text = normalize_text_value(text.as_ref(), preserve_whitespace);
-                if let Some(previous) = nodes[sibling.index()].prev_sibling
-                    && let NodeType::Text(existing) = &mut nodes[previous.index()].node_type
-                {
-                    append_normalized_text(existing, text.as_ref(), preserve_whitespace);
-                    return;
-                }
-                let child_id = NodeId::new(nodes.len());
-                insert_text_before_new(
-                    nodes,
-                    sibling,
-                    child_id,
-                    CompactString::from(text.as_ref()),
-                );
+fn insert_before_common_to_nodes(
+    nodes: &mut Vec<Node>,
+    sibling: NodeId,
+    child: NodeOrText<SinkHandle>,
+) {
+    match child {
+        NodeOrText::AppendText(text) => {
+            let preserve_whitespace = nodes[sibling.index()]
+                .parent
+                .is_some_and(|parent| preserves_whitespace_context(nodes, parent));
+            let text = normalize_text_value(text.as_ref(), preserve_whitespace);
+            if let Some(previous) = nodes[sibling.index()].prev_sibling
+                && let NodeType::Text(existing) = &mut nodes[previous.index()].node_type
+            {
+                append_normalized_text(existing, text.as_ref(), preserve_whitespace);
+                return;
             }
-            NodeOrText::AppendNode(child_id) => {
-                let nodes = self.nodes_mut();
-                insert_before(nodes, sibling, child_id);
-            }
+            let child_id = NodeId::new(nodes.len());
+            insert_text_before_new(nodes, sibling, child_id, CompactString::from(text.as_ref()));
+        }
+        NodeOrText::AppendNode(child) => {
+            insert_before(nodes, sibling, child.id);
         }
     }
 }
@@ -1232,22 +1222,26 @@ fn known_or_normalized_whitespace(text: &str) -> Option<&'static str> {
 }
 
 impl TreeSink for Sink {
-    type Handle = NodeId;
+    type Handle = SinkHandle;
     type Output = Document;
     type ElemName<'a>
-        = markup5ever::ExpandedName<'a>
+        = SinkHandleElemName<'a>
     where
         Self: 'a;
 
     fn finish(self) -> Document {
-        let mut nodes = self.nodes.into_inner();
-        if let Some(template_contents) = self.template_contents.into_inner() {
+        let SinkState {
+            mut nodes,
+            namespaces,
+            template_contents,
+        } = self.state.into_inner();
+        if !template_contents.is_empty() {
             splice_template_contents(&mut nodes, &template_contents);
         }
         shrink_sparse_nodes(&mut nodes);
         Document {
             nodes,
-            namespaces: self.namespaces.into_inner(),
+            namespaces,
             root: self.document,
             root_decomposed: false,
         }
@@ -1255,52 +1249,39 @@ impl TreeSink for Sink {
 
     fn parse_error(&self, _msg: Cow<'static, str>) {}
 
-    fn get_document(&self) -> NodeId {
-        self.document
+    fn get_document(&self) -> SinkHandle {
+        SinkHandle::node(self.document)
     }
 
     fn set_quirks_mode(&self, mode: QuirksMode) {
         self.quirks_mode.set(mode);
     }
 
-    fn same_node(&self, x: &NodeId, y: &NodeId) -> bool {
-        x == y
+    fn same_node(&self, x: &SinkHandle, y: &SinkHandle) -> bool {
+        x.id == y.id
     }
 
-    fn elem_name<'a>(&'a self, target: &'a NodeId) -> Self::ElemName<'a> {
-        match &self.nodes()[target.index()].node_type {
-            NodeType::Element(element) => markup5ever::ExpandedName {
-                ns: self.namespace(*target),
-                local: &element.local_name,
-            },
-            _ => markup5ever::ExpandedName {
-                ns: html_namespace(),
-                local: &self.fallback_local_name,
-            },
+    fn elem_name<'a>(&'a self, target: &'a SinkHandle) -> Self::ElemName<'a> {
+        SinkHandleElemName {
+            handle: target,
+            fallback_local_name: &self.fallback_local_name,
         }
     }
 
-    fn get_template_contents(&self, target: &NodeId) -> NodeId {
-        match &self.nodes()[target.index()].node_type {
-            NodeType::Element(_) => self
-                .template_contents()
-                .and_then(|templates| templates.get(target))
-                .copied()
-                .unwrap_or(*target),
-            _ => *target,
-        }
+    fn get_template_contents(&self, target: &SinkHandle) -> SinkHandle {
+        SinkHandle::node(target.template_contents.unwrap_or(target.id))
     }
 
-    fn is_mathml_annotation_xml_integration_point(&self, target: &NodeId) -> bool {
-        match &self.nodes()[target.index()].node_type {
-            NodeType::Element(_) => self
-                .mathml_annotation_xml_integration_points()
-                .is_some_and(|nodes| nodes.contains(target)),
-            _ => false,
-        }
+    fn is_mathml_annotation_xml_integration_point(&self, target: &SinkHandle) -> bool {
+        target.mathml_annotation_xml_integration_point
     }
 
-    fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> NodeId {
+    fn create_element(
+        &self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        flags: ElementFlags,
+    ) -> SinkHandle {
         let QualName {
             ns,
             local,
@@ -1317,7 +1298,8 @@ impl TreeSink for Sink {
             dedupe_attrs_last_wins(out)
         };
 
-        let nodes = self.nodes_mut();
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
         let template_contents = if flags.template {
             let id = NodeId::new(nodes.len());
             nodes.push(Node::new(NodeType::Document));
@@ -1327,25 +1309,38 @@ impl TreeSink for Sink {
         };
         let id = NodeId::new(nodes.len());
         nodes.push(Node::new(NodeType::Element(ElementData {
-            local_name: local,
+            local_name: local.clone(),
             attrs,
         })));
-        self.set_namespace(id, ns);
+        let namespace = if is_html_namespace(&ns) {
+            None
+        } else {
+            state
+                .namespaces
+                .get_or_insert_with(HashMap::new)
+                .insert(id, ns.clone());
+            Some(ns)
+        };
         if let Some(template_contents) = template_contents {
-            self.set_template_contents(id, template_contents);
+            state.template_contents.push((id, template_contents));
         }
-        if flags.mathml_annotation_xml_integration_point {
-            self.add_mathml_annotation_xml_integration_point(id);
+        SinkHandle {
+            id,
+            element_name: Some(SinkElementName {
+                namespace,
+                local_name: local,
+            }),
+            template_contents,
+            mathml_annotation_xml_integration_point: flags.mathml_annotation_xml_integration_point,
         }
-        id
     }
 
-    fn create_comment(&self, text: StrTendril) -> NodeId {
-        self.new_node(NodeType::Comment(CompactString::from(text.as_ref())))
+    fn create_comment(&self, text: StrTendril) -> SinkHandle {
+        self.new_handle(NodeType::Comment(CompactString::from(text.as_ref())))
     }
 
-    fn create_pi(&self, target: StrTendril, data: StrTendril) -> NodeId {
-        self.new_node(NodeType::ProcessingInstruction(Box::new(
+    fn create_pi(&self, target: StrTendril, data: StrTendril) -> SinkHandle {
+        self.new_handle(NodeType::ProcessingInstruction(Box::new(
             ProcessingInstructionData {
                 target: CompactString::from(target.as_ref()),
                 data: CompactString::from(data.as_ref()),
@@ -1353,24 +1348,26 @@ impl TreeSink for Sink {
         )))
     }
 
-    fn append(&self, parent: &NodeId, child: NodeOrText<NodeId>) {
-        self.append_common(*parent, child);
+    fn append(&self, parent: &SinkHandle, child: NodeOrText<SinkHandle>) {
+        self.append_common(parent.id, child);
     }
 
-    fn append_before_sibling(&self, sibling: &NodeId, new_node: NodeOrText<NodeId>) {
-        self.insert_before_common(*sibling, new_node);
+    fn append_before_sibling(&self, sibling: &SinkHandle, new_node: NodeOrText<SinkHandle>) {
+        self.insert_before_common(sibling.id, new_node);
     }
 
     fn append_based_on_parent_node(
         &self,
-        element: &NodeId,
-        prev_element: &NodeId,
-        child: NodeOrText<NodeId>,
+        element: &SinkHandle,
+        prev_element: &SinkHandle,
+        child: NodeOrText<SinkHandle>,
     ) {
-        if self.nodes()[element.index()].parent.is_some() {
-            self.insert_before_common(*element, child);
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
+        if nodes[element.id.index()].parent.is_some() {
+            insert_before_common_to_nodes(nodes, element.id, child);
         } else {
-            self.append_common(*prev_element, child);
+            append_common_to_nodes(nodes, prev_element.id, child);
         }
     }
 
@@ -1380,7 +1377,8 @@ impl TreeSink for Sink {
         public_id: StrTendril,
         system_id: StrTendril,
     ) {
-        let nodes = self.nodes_mut();
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
         let doctype = NodeId::new(nodes.len());
         nodes.push(Node::new(NodeType::Doctype(Box::new(DoctypeData {
             name: CompactString::from(name.as_ref()),
@@ -1390,9 +1388,10 @@ impl TreeSink for Sink {
         append_new(nodes, self.document, doctype);
     }
 
-    fn add_attrs_if_missing(&self, target: &NodeId, attrs: Vec<Attribute>) {
-        let nodes = self.nodes_mut();
-        let NodeType::Element(element) = &mut nodes[target.index()].node_type else {
+    fn add_attrs_if_missing(&self, target: &SinkHandle, attrs: Vec<Attribute>) {
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
+        let NodeType::Element(element) = &mut nodes[target.id.index()].node_type else {
             return;
         };
 
@@ -1415,23 +1414,25 @@ impl TreeSink for Sink {
         }
     }
 
-    fn remove_from_parent(&self, target: &NodeId) {
-        let nodes = self.nodes_mut();
-        detach(nodes, *target);
+    fn remove_from_parent(&self, target: &SinkHandle) {
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
+        detach(nodes, target.id);
     }
 
-    fn reparent_children(&self, node: &NodeId, new_parent: &NodeId) {
-        let nodes = self.nodes_mut();
-        let mut child = nodes[node.index()].first_child;
+    fn reparent_children(&self, node: &SinkHandle, new_parent: &SinkHandle) {
+        let mut state = self.state_mut();
+        let nodes = &mut state.nodes;
+        let mut child = nodes[node.id.index()].first_child;
         while let Some(current) = child {
             child = nodes[current.index()].next_sibling;
-            append_existing(nodes, *new_parent, current);
+            append_existing(nodes, new_parent.id, current);
         }
     }
 }
 
-fn splice_template_contents(nodes: &mut [Node], template_contents: &HashMap<NodeId, NodeId>) {
-    for (&template, &contents) in template_contents {
+fn splice_template_contents(nodes: &mut [Node], template_contents: &[(NodeId, NodeId)]) {
+    for &(template, contents) in template_contents {
         let mut child = nodes[contents.index()].first_child;
         while let Some(current) = child {
             child = nodes[current.index()].next_sibling;
