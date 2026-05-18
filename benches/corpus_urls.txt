@@ -1,0 +1,123 @@
+# Curated public URL seed list for the rustysoup benchmark corpus.
+#
+# Format:
+# category<TAB>https://example.com/page
+#
+# Keep this as a URL manifest, not a checked-in HTML corpus. The collector
+# respects robots.txt by default and writes fetched pages under .benchmarks/.
+
+homepage	https://www.python.org/
+homepage	https://www.rust-lang.org/
+homepage	https://www.mozilla.org/en-US/
+homepage	https://www.wikipedia.org/
+homepage	https://www.w3.org/
+homepage	https://www.gnu.org/
+homepage	https://www.djangoproject.com/
+homepage	https://flask.palletsprojects.com/
+homepage	https://fastapi.tiangolo.com/
+homepage	https://pypi.org/
+homepage	https://crates.io/
+homepage	https://rubygems.org/
+homepage	https://packagist.org/
+homepage	https://news.ycombinator.com/
+homepage	https://www.bbc.com/news
+homepage	https://www.npr.org/
+homepage	https://apnews.com/
+homepage	https://www.theguardian.com/international
+
+news_section	https://www.npr.org/sections/news/
+news_section	https://www.bbc.com/news/world
+news_section	https://www.theguardian.com/world
+news_article	https://www.npr.org/2026/05/16/nx-s1-5824533/bill-cassidy-lost-louisiana-primary-letlow-trump
+news_article	https://apnews.com/hub/artificial-intelligence
+news_article	https://www.bbc.com/news/science-environment-24021772
+
+ecommerce_category	http://books.toscrape.com/
+ecommerce_category	http://books.toscrape.com/catalogue/category/books/travel_2/index.html
+ecommerce_category	http://books.toscrape.com/catalogue/category/books/science_22/index.html
+ecommerce_category	http://books.toscrape.com/catalogue/category/books/mystery_3/index.html
+ecommerce_product	http://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
+ecommerce_product	http://books.toscrape.com/catalogue/tipping-the-velvet_999/index.html
+ecommerce_product	http://books.toscrape.com/catalogue/soumission_998/index.html
+ecommerce_category	https://scrapeme.live/shop/
+ecommerce_product	https://scrapeme.live/shop/Bulbasaur/
+ecommerce_product	https://scrapeme.live/shop/Charmander/
+ecommerce_product	https://scrapeme.live/shop/Squirtle/
+
+docs_article	https://docs.python.org/3/
+docs_article	https://docs.python.org/3/library/stdtypes.html
+docs_article	https://docs.python.org/3/library/asyncio.html
+docs_article	https://doc.rust-lang.org/book/
+docs_article	https://doc.rust-lang.org/std/
+docs_article	https://doc.rust-lang.org/cargo/
+docs_article	https://pyo3.rs/
+docs_article	https://www.maturin.rs/
+docs_article	https://developer.mozilla.org/en-US/docs/Web/HTML
+docs_article	https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_selectors
+docs_article	https://numpy.org/doc/stable/
+docs_article	https://pandas.pydata.org/docs/
+docs_article	https://requests.readthedocs.io/en/latest/
+docs_article	https://click.palletsprojects.com/
+docs_article	https://flask.palletsprojects.com/en/stable/
+docs_article	https://docs.djangoproject.com/en/stable/
+
+blog_post	https://blog.rust-lang.org/
+blog_post	https://blog.python.org/
+blog_post	https://www.djangoproject.com/weblog/
+blog_post	https://github.blog/
+blog_post	https://engineering.atspotify.com/
+blog_post	https://blog.cloudflare.com/
+
+forum_thread	https://news.ycombinator.com/news
+forum_thread	https://news.ycombinator.com/newest
+forum_thread	https://news.ycombinator.com/front
+forum_thread	https://forum.djangoproject.com/
+forum_thread	https://news.ycombinator.com/item?id=8863
+forum_thread	https://discuss.python.org/
+forum_thread	https://users.rust-lang.org/
+forum_thread	https://internals.rust-lang.org/
+
+profile	https://pypi.org/project/beautifulsoup4/
+profile	https://pypi.org/project/lxml/
+profile	https://pypi.org/project/maturin/
+profile	https://pypi.org/project/pydantic/
+profile	https://crates.io/crates/html5ever
+profile	https://crates.io/crates/selectors
+profile	https://crates.io/crates/pyo3
+profile	https://rubygems.org/gems/rails
+profile	https://packagist.org/packages/monolog/monolog
+
+table_heavy	https://en.wikipedia.org/wiki/List_of_countries_by_population_(United_Nations)
+table_heavy	https://en.wikipedia.org/wiki/Comparison_of_programming_languages
+table_heavy	https://en.wikipedia.org/wiki/List_of_HTTP_status_codes
+table_heavy	https://en.wikipedia.org/wiki/List_of_Unicode_characters
+table_heavy	https://en.wikipedia.org/wiki/HTML_element
+table_heavy	https://docs.python.org/3/library/functions.html
+
+form_heavy	https://httpbin.org/forms/post
+form_heavy	https://www.w3.org/WAI/tutorials/forms/
+form_heavy	https://developer.mozilla.org/en-US/docs/Learn_web_development/Extensions/Forms
+form_heavy	https://www.python.org/search/
+
+international	https://es.wikipedia.org/wiki/Python
+international	https://fr.wikipedia.org/wiki/Hypertext_Markup_Language
+international	https://de.wikipedia.org/wiki/HTML5
+international	https://ja.wikipedia.org/wiki/HyperText_Markup_Language
+international	https://pt.wikipedia.org/wiki/Python
+international	https://ru.wikipedia.org/wiki/Python
+international	https://ar.wikipedia.org/wiki/HTML
+international	https://zh.wikipedia.org/wiki/HTML
+
+large_page	https://en.wikipedia.org/wiki/JavaScript
+large_page	https://en.wikipedia.org/wiki/Python_(programming_language)
+large_page	https://en.wikipedia.org/wiki/Web_scraping
+large_page	https://docs.python.org/3/library/index.html
+large_page	https://doc.rust-lang.org/reference/
+large_page	https://html.spec.whatwg.org/multipage/
+large_page	https://www.w3.org/TR/2011/WD-html5-20110525/
+
+malformed_legacy	http://info.cern.ch/hypertext/WWW/TheProject.html
+malformed_legacy	https://www.w3.org/History/19921103-hypertext/hypertext/WWW/TheProject.html
+malformed_legacy	https://www.w3.org/People/Berners-Lee/WorldWideWeb.html
+malformed_legacy	https://www.ietf.org/rfc/rfc1866.txt
+malformed_legacy	http://www.columbia.edu/~fdc/sample.html

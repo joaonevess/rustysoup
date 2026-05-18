@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo test
+        run: cargo test --all-features
+
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create virtualenv
+        run: python -m venv .venv
+      - name: Install test tooling
+        run: .venv/bin/python -m pip install --upgrade pip "maturin>=1.13.3,<2" "pytest>=9.0.3" "beautifulsoup4>=4.14.3" "chardet>=5.2,<8" "lxml>=6.1.0"
+      - name: Install rustysoup editable extension
+        run: . .venv/bin/activate && maturin develop --release
+      - name: pytest
+        run: .venv/bin/python -m pytest -q

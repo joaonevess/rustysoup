@@ -1,0 +1,28 @@
+# Example URL file for benches/collect_corpus.py.
+#
+# Format:
+# category<TAB>https://example.com/page
+#
+# Do not blindly crawl the web. Curate URLs you are allowed to fetch, keep the
+# rate limit gentle, and do not commit collected third-party HTML snapshots.
+#
+# Good category names:
+# homepage
+# news_article
+# news_section
+# ecommerce_category
+# ecommerce_product
+# docs_article
+# blog_post
+# forum_thread
+# profile
+# table_heavy
+# form_heavy
+# international
+# large_page
+# malformed_legacy
+#
+# Example lines:
+# docs_article	https://example.com/docs/getting-started
+# news_article	https://example.com/news/story
+# ecommerce_product	https://example.com/products/widget

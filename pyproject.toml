@@ -1,0 +1,75 @@
+[build-system]
+requires = ["maturin>=1.13.3,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rustysoup"
+description = "Fast HTML parsing for Python with BeautifulSoup-style ergonomics."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "rustysoup contributors" }]
+keywords = ["rustysoup", "html", "parser", "beautifulsoup", "bs4", "rust", "scraping", "web-scraping"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Text Processing :: Markup :: HTML",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["beautifulsoup4>=4.14.3", "chardet>=5.2,<8", "lxml>=6.1.0", "pytest>=9.0.3"]
+bench = [
+    "beautifulsoup4>=4.14.3",
+    "lxml>=6.1.0",
+    "selectolax>=0.4.9",
+    "html5-parser>=0.4.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/joaonevess/rustysoup"
+Repository = "https://github.com/joaonevess/rustysoup"
+Issues = "https://github.com/joaonevess/rustysoup/issues"
+Security = "https://github.com/joaonevess/rustysoup/security/policy"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rustysoup._rustysoup"
+python-source = "."
+include = ["rustysoup/py.typed", "rustysoup/**/*.pyi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore:Call to deprecated method .*:DeprecationWarning",
+    "ignore:Access to deprecated property .*:DeprecationWarning",
+    "ignore:The 'text' argument to find\\(\\)-type methods is deprecated.*:DeprecationWarning",
+    "ignore:No parser was explicitly specified.*:bs4.GuessedAtParserWarning",
+    "ignore:The given value for parse_only will exclude everything.*:UserWarning",
+]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_*"
+build-frontend = "build"
+test-command = "python {project}/ci/smoke_wheel.py"
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+before-all = "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable"
+environment = "PATH=\"$HOME/.cargo/bin:$PATH\""
