@@ -1,6 +1,7 @@
 use crate::attrs::{Attr, attrs_to_map};
 use compact_str::CompactString;
 use markup5ever::{LocalName, Namespace, ns};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -108,6 +109,19 @@ pub struct Document {
     pub namespaces: Option<HashMap<NodeId, Namespace>>,
     pub root: NodeId,
     pub root_decomposed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SerializeFrame {
+    Node(NodeId),
+    CloseElement(NodeId),
+    DocumentDoctypeNewline,
+}
+
+#[derive(Clone, Copy)]
+enum PrettifyFrame {
+    Node(NodeId, usize),
+    CloseElement(NodeId, usize),
 }
 
 impl Document {
@@ -265,17 +279,29 @@ impl Document {
     }
 
     fn clone_detached_subtree(&mut self, source: &Document, source_id: NodeId) -> NodeId {
+        let id = self.clone_detached_node(source, source_id);
+        let mut stack = Vec::with_capacity(16);
+        stack.push((source_id, id));
+
+        while let Some((source_parent, target_parent)) = stack.pop() {
+            let mut child = source.node(source_parent).first_child;
+            while let Some(current) = child {
+                let child_id = self.clone_detached_node(source, current);
+                self.append_existing(target_parent, child_id);
+                stack.push((current, child_id));
+                child = source.node(current).next_sibling;
+            }
+        }
+
+        id
+    }
+
+    fn clone_detached_node(&mut self, source: &Document, source_id: NodeId) -> NodeId {
         let id = self.push_node(Node::new(source.node(source_id).node_type.clone()));
         if source.element(source_id).is_some()
             && let Some(namespace) = source.namespace_override(source_id)
         {
             self.set_element_namespace(id, namespace.clone());
-        }
-        let mut child = source.node(source_id).first_child;
-        while let Some(current) = child {
-            let child_id = self.clone_detached_subtree(source, current);
-            self.append_existing(id, child_id);
-            child = source.node(current).next_sibling;
         }
         id
     }
@@ -704,31 +730,21 @@ impl Document {
         count
     }
 
-    pub fn descendant_elements(&self, id: NodeId, include_self: bool) -> Vec<NodeId> {
+    pub fn descendant_elements(&self, root: NodeId, include_self: bool) -> Vec<NodeId> {
         let mut out = Vec::new();
-        if include_self && self.is_element(id) {
-            out.push(id);
-        }
-        let mut child = self.node(id).first_child;
-        while let Some(current) = child {
-            if self.is_element(current) {
-                out.push(current);
+        let mut current = if include_self {
+            Some(root)
+        } else {
+            self.node(root).first_child
+        };
+
+        while let Some(id) = current {
+            if self.is_element(id) {
+                out.push(id);
             }
-            self.push_descendant_elements(current, &mut out);
-            child = self.node(current).next_sibling;
+            current = self.next_in_subtree(root, id);
         }
         out
-    }
-
-    fn push_descendant_elements(&self, id: NodeId, out: &mut Vec<NodeId>) {
-        let mut child = self.node(id).first_child;
-        while let Some(current) = child {
-            if self.is_element(current) {
-                out.push(current);
-            }
-            self.push_descendant_elements(current, out);
-            child = self.node(current).next_sibling;
-        }
     }
 
     pub fn find_descendant_element(
@@ -752,22 +768,19 @@ impl Document {
         None
     }
 
-    pub fn descendant_nodes(&self, id: NodeId, include_self: bool) -> Vec<NodeId> {
+    pub fn descendant_nodes(&self, root: NodeId, include_self: bool) -> Vec<NodeId> {
         let mut out = Vec::new();
-        if include_self {
-            out.push(id);
-        }
-        self.push_descendant_nodes(id, &mut out);
-        out
-    }
+        let mut current = if include_self {
+            Some(root)
+        } else {
+            self.node(root).first_child
+        };
 
-    fn push_descendant_nodes(&self, id: NodeId, out: &mut Vec<NodeId>) {
-        let mut child = self.node(id).first_child;
-        while let Some(current) = child {
-            out.push(current);
-            self.push_descendant_nodes(current, out);
-            child = self.node(current).next_sibling;
+        while let Some(id) = current {
+            out.push(id);
+            current = self.next_in_subtree(root, id);
         }
+        out
     }
 
     pub fn sibling_nodes_after(&self, id: NodeId) -> Vec<NodeId> {
@@ -829,6 +842,17 @@ impl Document {
         None
     }
 
+    fn next_after_subtree(&self, root: NodeId, id: NodeId) -> Option<NodeId> {
+        let mut current = id;
+        while current != root {
+            if let Some(sibling) = self.node(current).next_sibling {
+                return Some(sibling);
+            }
+            current = self.node(current).parent?;
+        }
+        None
+    }
+
     pub fn next_element_nodes(&self, id: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut current = self.next_element_node(id);
@@ -866,27 +890,29 @@ impl Document {
     }
 
     pub fn tag_string_node(&self, id: NodeId) -> Option<NodeId> {
-        let first = self.node(id).first_child?;
-        if self.node(first).next_sibling.is_some() {
-            return None;
+        let mut current = id;
+        loop {
+            let first = self.node(current).first_child?;
+            if self.node(first).next_sibling.is_some() {
+                return None;
+            }
+            if self.is_text_like(first) {
+                return Some(first);
+            }
+            if !self.is_element(first) {
+                return None;
+            }
+            current = first;
         }
-        if self.is_text_like(first) {
-            return Some(first);
-        }
-        if self.is_element(first) {
-            return self.tag_string_node(first);
-        }
-        None
     }
 
     pub fn smooth_text_nodes(&mut self, root: NodeId) {
-        let children = self.child_nodes(root);
-        for child in children {
-            if self.node(child).parent.is_some() {
-                self.smooth_text_nodes(child);
+        let nodes = self.descendant_nodes(root, true);
+        for id in nodes.into_iter().rev() {
+            if id == root || self.node(id).parent.is_some() {
+                self.merge_adjacent_text_children(id);
             }
         }
-        self.merge_adjacent_text_children(root);
     }
 
     fn merge_adjacent_text_children(&mut self, parent: NodeId) {
@@ -956,134 +982,76 @@ impl Document {
     ) -> String {
         let mut out = String::new();
         let mut first = true;
-        self.collect_text_into(
-            id,
-            id,
-            separator,
-            strip,
-            include_text,
-            include_cdata,
-            include_declaration,
-            include_template,
-            include_comments,
-            include_script,
-            include_stylesheet,
-            include_raw_text,
-            include_doctype,
-            include_processing_instruction,
-            include_root_raw_text,
-            &mut first,
-            &mut out,
-        );
-        out
-    }
+        let mut current = Some(id);
 
-    #[allow(clippy::too_many_arguments)]
-    fn collect_text_into(
-        &self,
-        root: NodeId,
-        id: NodeId,
-        separator: &str,
-        strip: bool,
-        include_text: bool,
-        include_cdata: bool,
-        include_declaration: bool,
-        include_template: bool,
-        include_comments: bool,
-        include_script: bool,
-        include_stylesheet: bool,
-        include_raw_text: bool,
-        include_doctype: bool,
-        include_processing_instruction: bool,
-        include_root_raw_text: bool,
-        first: &mut bool,
-        out: &mut String,
-    ) {
-        if id != root
-            && let Some(name) = self.raw_text_element_name(id)
-        {
-            let include = include_raw_text
-                || (name == "script" && include_script)
-                || (name == "style" && include_stylesheet);
-            if !include {
-                return;
-            }
-        }
-        match &self.node(id).node_type {
-            NodeType::Text(text) => {
-                let include = match self.raw_text_parent_name(id) {
-                    Some("script") => {
-                        include_script
-                            || include_raw_text
-                            || (include_root_raw_text
-                                && include_text
-                                && self.node(id).parent == Some(root))
-                    }
-                    Some("style") => {
-                        include_stylesheet
-                            || include_raw_text
-                            || (include_root_raw_text
-                                && include_text
-                                && self.node(id).parent == Some(root))
-                    }
-                    _ => include_text,
-                };
-                if include {
-                    push_text_value(text, separator, strip, first, out);
-                }
-            }
-            NodeType::CData(text) if include_cdata => {
-                push_text_value(text, separator, strip, first, out);
-            }
-            NodeType::Declaration(text) if include_declaration => {
-                push_text_value(text, separator, strip, first, out);
-            }
-            NodeType::TemplateString(text) if include_template => {
-                push_text_value(text, separator, strip, first, out);
-            }
-            NodeType::Comment(text) if include_comments => {
-                push_text_value(text, separator, strip, first, out);
-            }
-            NodeType::Doctype(data) if include_doctype => {
-                push_text_value(&data.name, separator, strip, first, out);
-            }
-            NodeType::ProcessingInstruction(data)
-                if include_processing_instruction && data.data.is_empty() =>
+        while let Some(current_id) = current {
+            if current_id != id
+                && let Some(name) = self.raw_text_element_name(current_id)
             {
-                push_text_value(&data.target, separator, strip, first, out);
-            }
-            NodeType::ProcessingInstruction(data) if include_processing_instruction => {
-                let mut value = data.target.to_string();
-                value.push(' ');
-                value.push_str(&data.data);
-                push_string_value(&value, separator, strip, first, out);
-            }
-            _ => {
-                let mut child = self.node(id).first_child;
-                while let Some(current) = child {
-                    self.collect_text_into(
-                        root,
-                        current,
-                        separator,
-                        strip,
-                        include_text,
-                        include_cdata,
-                        include_declaration,
-                        include_template,
-                        include_comments,
-                        include_script,
-                        include_stylesheet,
-                        include_raw_text,
-                        include_doctype,
-                        include_processing_instruction,
-                        include_root_raw_text,
-                        first,
-                        out,
-                    );
-                    child = self.node(current).next_sibling;
+                let include = include_raw_text
+                    || (name == "script" && include_script)
+                    || (name == "style" && include_stylesheet);
+                if !include {
+                    current = self.next_after_subtree(id, current_id);
+                    continue;
                 }
             }
+
+            match &self.node(current_id).node_type {
+                NodeType::Text(text) => {
+                    let include = match self.raw_text_parent_name(current_id) {
+                        Some("script") => {
+                            include_script
+                                || include_raw_text
+                                || (include_root_raw_text
+                                    && include_text
+                                    && self.node(current_id).parent == Some(id))
+                        }
+                        Some("style") => {
+                            include_stylesheet
+                                || include_raw_text
+                                || (include_root_raw_text
+                                    && include_text
+                                    && self.node(current_id).parent == Some(id))
+                        }
+                        _ => include_text,
+                    };
+                    if include {
+                        push_text_value(text, separator, strip, &mut first, &mut out);
+                    }
+                }
+                NodeType::CData(text) if include_cdata => {
+                    push_text_value(text, separator, strip, &mut first, &mut out);
+                }
+                NodeType::Declaration(text) if include_declaration => {
+                    push_text_value(text, separator, strip, &mut first, &mut out);
+                }
+                NodeType::TemplateString(text) if include_template => {
+                    push_text_value(text, separator, strip, &mut first, &mut out);
+                }
+                NodeType::Comment(text) if include_comments => {
+                    push_text_value(text, separator, strip, &mut first, &mut out);
+                }
+                NodeType::Doctype(data) if include_doctype => {
+                    push_text_value(&data.name, separator, strip, &mut first, &mut out);
+                }
+                NodeType::ProcessingInstruction(data)
+                    if include_processing_instruction && data.data.is_empty() =>
+                {
+                    push_text_value(&data.target, separator, strip, &mut first, &mut out);
+                }
+                NodeType::ProcessingInstruction(data) if include_processing_instruction => {
+                    let mut value = data.target.to_string();
+                    value.push(' ');
+                    value.push_str(&data.data);
+                    push_string_value(&value, separator, strip, &mut first, &mut out);
+                }
+                _ => {}
+            }
+
+            current = self.next_in_subtree(id, current_id);
         }
+        out
     }
 
     pub fn outer_html(&self, id: NodeId) -> String {
@@ -1168,12 +1136,9 @@ impl Document {
         formatter: &mut SerializationFormatter<'_, E>,
         out: &mut String,
     ) -> Result<(), E> {
-        let mut child = self.node(id).first_child;
-        while let Some(current) = child {
-            self.serialize_node(current, formatter, out)?;
-            child = self.node(current).next_sibling;
-        }
-        Ok(())
+        let mut stack = SmallVec::<[SerializeFrame; 64]>::new();
+        self.push_serialization_children(id, false, &mut stack);
+        self.serialize_frames(stack, formatter, out)
     }
 
     fn serialize_node<E>(
@@ -1182,114 +1147,147 @@ impl Document {
         formatter: &mut SerializationFormatter<'_, E>,
         out: &mut String,
     ) -> Result<(), E> {
-        match &self.node(id).node_type {
-            NodeType::Document => {
-                let mut child = self.node(id).first_child;
-                while let Some(current) = child {
-                    self.serialize_node(current, formatter, out)?;
-                    if matches!(self.node(current).node_type, NodeType::Doctype(_)) {
-                        out.push('\n');
-                    }
-                    child = self.node(current).next_sibling;
-                }
-            }
-            NodeType::Element(element) => {
-                out.push('<');
-                out.push_str(element.tag_name());
-                let mut attrs = self.element_attrs(id).iter().collect::<Vec<_>>();
-                attrs.sort_by(|left, right| left.name.cmp(&right.name));
-                let is_content_type_meta = element.tag_name() == "meta"
-                    && attrs.iter().any(|attr| {
-                        attr.name() == "http-equiv"
-                            && attr
-                                .value
-                                .as_ref()
-                                .is_some_and(|value| value.eq_ignore_ascii_case("content-type"))
-                    });
-                for attr in attrs {
-                    out.push(' ');
-                    out.push_str(attr.name());
-                    if let Some(value) = &attr.value {
-                        out.push_str("=\"");
-                        if let Some(substituted) = substitute_meta_charset_attr(
-                            element.tag_name(),
-                            attr.name(),
-                            value,
-                            is_content_type_meta,
-                            formatter.eventual_encoding(),
-                        ) {
-                            formatter.write_attr(&substituted, out)?;
-                        } else {
-                            formatter.write_attr(value, out)?;
+        let mut stack = SmallVec::<[SerializeFrame; 64]>::new();
+        stack.push(SerializeFrame::Node(id));
+        self.serialize_frames(stack, formatter, out)
+    }
+
+    fn serialize_frames<E>(
+        &self,
+        mut stack: SmallVec<[SerializeFrame; 64]>,
+        formatter: &mut SerializationFormatter<'_, E>,
+        out: &mut String,
+    ) -> Result<(), E> {
+        while let Some(frame) = stack.pop() {
+            match frame {
+                SerializeFrame::Node(id) => match &self.node(id).node_type {
+                    NodeType::Document => self.push_serialization_children(id, true, &mut stack),
+                    NodeType::Element(element) => {
+                        out.push('<');
+                        out.push_str(element.tag_name());
+                        let mut attrs = self.element_attrs(id).iter().collect::<Vec<_>>();
+                        attrs.sort_by(|left, right| left.name.cmp(&right.name));
+                        let is_content_type_meta = element.tag_name() == "meta"
+                            && attrs.iter().any(|attr| {
+                                attr.name() == "http-equiv"
+                                    && attr.value.as_ref().is_some_and(|value| {
+                                        value.eq_ignore_ascii_case("content-type")
+                                    })
+                            });
+                        for attr in attrs {
+                            out.push(' ');
+                            out.push_str(attr.name());
+                            if let Some(value) = &attr.value {
+                                out.push_str("=\"");
+                                if let Some(substituted) = substitute_meta_charset_attr(
+                                    element.tag_name(),
+                                    attr.name(),
+                                    value,
+                                    is_content_type_meta,
+                                    formatter.eventual_encoding(),
+                                ) {
+                                    formatter.write_attr(&substituted, out)?;
+                                } else {
+                                    formatter.write_attr(value, out)?;
+                                }
+                                out.push('"');
+                            }
                         }
-                        out.push('"');
+                        if is_void_element(element.tag_name())
+                            && self.node(id).first_child.is_none()
+                        {
+                            out.push_str("/>");
+                        } else {
+                            out.push('>');
+                            stack.push(SerializeFrame::CloseElement(id));
+                            self.push_serialization_children(id, false, &mut stack);
+                        }
+                    }
+                    NodeType::Text(text) => {
+                        if self.text_has_raw_text_parent(id) {
+                            out.push_str(text);
+                        } else {
+                            formatter.write_text(text, out)?;
+                        }
+                    }
+                    NodeType::CData(text) => {
+                        out.push_str("<![CDATA[");
+                        out.push_str(text);
+                        out.push_str("]]>");
+                    }
+                    NodeType::Declaration(text) => {
+                        out.push_str("<?");
+                        out.push_str(text);
+                        out.push_str("?>");
+                    }
+                    NodeType::TemplateString(text) => {
+                        formatter.write_text(text, out)?;
+                    }
+                    NodeType::Comment(text) => {
+                        out.push_str("<!--");
+                        out.push_str(text);
+                        out.push_str("-->");
+                    }
+                    NodeType::Doctype(data) => {
+                        out.push_str("<!DOCTYPE ");
+                        out.push_str(&data.name);
+                        if !data.public_id.is_empty() {
+                            out.push_str(" PUBLIC \"");
+                            formatter.write_attr(&data.public_id, out)?;
+                            out.push('"');
+                            if !data.system_id.is_empty() {
+                                out.push_str(" \"");
+                                formatter.write_attr(&data.system_id, out)?;
+                                out.push('"');
+                            }
+                        } else if !data.system_id.is_empty() {
+                            out.push_str(" SYSTEM \"");
+                            formatter.write_attr(&data.system_id, out)?;
+                            out.push('"');
+                        }
+                        out.push('>');
+                    }
+                    NodeType::ProcessingInstruction(data) => {
+                        out.push_str("<?");
+                        out.push_str(&data.target);
+                        if !data.data.is_empty() {
+                            out.push(' ');
+                            out.push_str(&data.data);
+                        }
+                        out.push('>');
+                    }
+                },
+                SerializeFrame::CloseElement(id) => {
+                    if let Some(element) = self.element(id) {
+                        out.push_str("</");
+                        out.push_str(element.tag_name());
+                        out.push('>');
                     }
                 }
-                if is_void_element(element.tag_name()) && self.node(id).first_child.is_none() {
-                    out.push_str("/>");
-                } else {
-                    out.push('>');
-                    self.serialize_children(id, formatter, out)?;
-                    out.push_str("</");
-                    out.push_str(element.tag_name());
-                    out.push('>');
-                }
-            }
-            NodeType::Text(text) => {
-                if self.text_has_raw_text_parent(id) {
-                    out.push_str(text);
-                } else {
-                    formatter.write_text(text, out)?;
-                }
-            }
-            NodeType::CData(text) => {
-                out.push_str("<![CDATA[");
-                out.push_str(text);
-                out.push_str("]]>");
-            }
-            NodeType::Declaration(text) => {
-                out.push_str("<?");
-                out.push_str(text);
-                out.push_str("?>");
-            }
-            NodeType::TemplateString(text) => {
-                formatter.write_text(text, out)?;
-            }
-            NodeType::Comment(text) => {
-                out.push_str("<!--");
-                out.push_str(text);
-                out.push_str("-->");
-            }
-            NodeType::Doctype(data) => {
-                out.push_str("<!DOCTYPE ");
-                out.push_str(&data.name);
-                if !data.public_id.is_empty() {
-                    out.push_str(" PUBLIC \"");
-                    formatter.write_attr(&data.public_id, out)?;
-                    out.push('"');
-                    if !data.system_id.is_empty() {
-                        out.push_str(" \"");
-                        formatter.write_attr(&data.system_id, out)?;
-                        out.push('"');
-                    }
-                } else if !data.system_id.is_empty() {
-                    out.push_str(" SYSTEM \"");
-                    formatter.write_attr(&data.system_id, out)?;
-                    out.push('"');
-                }
-                out.push('>');
-            }
-            NodeType::ProcessingInstruction(data) => {
-                out.push_str("<?");
-                out.push_str(&data.target);
-                if !data.data.is_empty() {
-                    out.push(' ');
-                    out.push_str(&data.data);
-                }
-                out.push('>');
+                SerializeFrame::DocumentDoctypeNewline => out.push('\n'),
             }
         }
         Ok(())
+    }
+
+    fn push_serialization_children(
+        &self,
+        id: NodeId,
+        doctype_newline: bool,
+        stack: &mut SmallVec<[SerializeFrame; 64]>,
+    ) {
+        let parent_adds_doctype_newline =
+            doctype_newline && matches!(self.node(id).node_type, NodeType::Document);
+        let mut child = self.node(id).last_child;
+        while let Some(current) = child {
+            if parent_adds_doctype_newline
+                && matches!(self.node(current).node_type, NodeType::Doctype(_))
+            {
+                stack.push(SerializeFrame::DocumentDoctypeNewline);
+            }
+            stack.push(SerializeFrame::Node(current));
+            child = self.node(current).prev_sibling;
+        }
     }
 
     pub fn prettify_with_options(&self, id: NodeId, escape: bool) -> String {
@@ -1316,7 +1314,24 @@ impl Document {
         formatter: &mut SerializationFormatter<'_, E>,
     ) -> Result<String, E> {
         let mut out = String::new();
-        self.prettify_node(id, 0, formatter, &mut out)?;
+        let mut stack = SmallVec::<[PrettifyFrame; 64]>::new();
+        stack.push(PrettifyFrame::Node(id, 0));
+        while let Some(frame) = stack.pop() {
+            match frame {
+                PrettifyFrame::Node(id, depth) => {
+                    self.prettify_node(id, depth, formatter, &mut out, &mut stack)?;
+                }
+                PrettifyFrame::CloseElement(id, depth) => {
+                    let indent = " ".repeat(depth);
+                    if let Some(element) = self.element(id) {
+                        out.push_str(&indent);
+                        out.push_str("</");
+                        out.push_str(element.tag_name());
+                        out.push_str(">\n");
+                    }
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -1326,13 +1341,14 @@ impl Document {
         depth: usize,
         formatter: &mut SerializationFormatter<'_, E>,
         out: &mut String,
+        stack: &mut SmallVec<[PrettifyFrame; 64]>,
     ) -> Result<(), E> {
         match &self.node(id).node_type {
             NodeType::Document => {
-                let mut child = self.node(id).first_child;
+                let mut child = self.node(id).last_child;
                 while let Some(current) = child {
-                    self.prettify_node(current, depth, formatter, out)?;
-                    child = self.node(current).next_sibling;
+                    stack.push(PrettifyFrame::Node(current, depth));
+                    child = self.node(current).prev_sibling;
                 }
             }
             NodeType::Element(element) => {
@@ -1356,15 +1372,12 @@ impl Document {
                     return Ok(());
                 }
                 out.push_str(">\n");
-                let mut child = self.node(id).first_child;
+                stack.push(PrettifyFrame::CloseElement(id, depth));
+                let mut child = self.node(id).last_child;
                 while let Some(current) = child {
-                    self.prettify_node(current, depth + 1, formatter, out)?;
-                    child = self.node(current).next_sibling;
+                    stack.push(PrettifyFrame::Node(current, depth + 1));
+                    child = self.node(current).prev_sibling;
                 }
-                out.push_str(&indent);
-                out.push_str("</");
-                out.push_str(element.tag_name());
-                out.push_str(">\n");
             }
             NodeType::Text(text) => {
                 let trimmed = text.trim();

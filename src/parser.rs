@@ -1444,20 +1444,25 @@ fn splice_template_contents(nodes: &mut [Node], template_contents: &HashMap<Node
 }
 
 fn mark_template_strings(nodes: &mut [Node], id: NodeId, inside_raw_text: bool) {
-    let in_raw_text = inside_raw_text
-        || matches!(
-            &nodes[id.index()].node_type,
-            NodeType::Element(element) if is_raw_text_element(element.tag_name())
-        );
+    let mut stack = Vec::with_capacity(16);
+    stack.push((id, inside_raw_text));
 
-    if !in_raw_text && let NodeType::Text(text) = &nodes[id.index()].node_type {
-        nodes[id.index()].node_type = NodeType::TemplateString(text.clone());
-    }
+    while let Some((current, inherited_raw_text)) = stack.pop() {
+        let in_raw_text = inherited_raw_text
+            || matches!(
+                &nodes[current.index()].node_type,
+                NodeType::Element(element) if is_raw_text_element(element.tag_name())
+            );
 
-    let mut child = nodes[id.index()].first_child;
-    while let Some(current) = child {
-        child = nodes[current.index()].next_sibling;
-        mark_template_strings(nodes, current, in_raw_text);
+        if !in_raw_text && let NodeType::Text(text) = &nodes[current.index()].node_type {
+            nodes[current.index()].node_type = NodeType::TemplateString(text.clone());
+        }
+
+        let mut child = nodes[current.index()].last_child;
+        while let Some(child_id) = child {
+            stack.push((child_id, in_raw_text));
+            child = nodes[child_id.index()].prev_sibling;
+        }
     }
 }
 

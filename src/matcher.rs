@@ -723,75 +723,45 @@ fn select_descendant_pair_into(
     on_match: &mut impl FnMut(NodeId) -> PyResult<()>,
 ) -> PyResult<()> {
     let mut count = 0usize;
+    let mut stack: SmallVec<[(NodeId, bool); 64]> = SmallVec::new();
     if include_root {
-        visit_descendant_pair_node(
-            document, root, false, ancestor, target, limit, on_match, &mut count,
-        )?;
+        stack.push((root, false));
     } else {
         let root_matches_ancestor = ancestor.matches(document, root);
-        let mut child = document.node(root).first_child;
-        while let Some(current) = child {
-            let next = document.node(current).next_sibling;
-            if visit_descendant_pair_node(
-                document,
-                current,
-                root_matches_ancestor,
-                ancestor,
-                target,
-                limit,
-                on_match,
-                &mut count,
-            )? {
-                break;
-            }
-            child = next;
-        }
+        push_descendant_pair_children(document, root, root_matches_ancestor, &mut stack);
     }
+
+    while let Some((id, has_matching_ancestor)) = stack.pop() {
+        let child_has_matching_ancestor = if document.is_element(id) {
+            if has_matching_ancestor && target.matches(document, id) {
+                on_match(id)?;
+                count += 1;
+                if limit > 0 && count >= limit {
+                    break;
+                }
+            }
+            has_matching_ancestor || ancestor.matches(document, id)
+        } else {
+            has_matching_ancestor
+        };
+
+        push_descendant_pair_children(document, id, child_has_matching_ancestor, &mut stack);
+    }
+
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit_descendant_pair_node(
+fn push_descendant_pair_children(
     document: &Document,
-    id: NodeId,
+    parent: NodeId,
     has_matching_ancestor: bool,
-    ancestor: &FastSelector<'_>,
-    target: &FastSelector<'_>,
-    limit: usize,
-    on_match: &mut impl FnMut(NodeId) -> PyResult<()>,
-    count: &mut usize,
-) -> PyResult<bool> {
-    let child_has_matching_ancestor = if document.is_element(id) {
-        if has_matching_ancestor && target.matches(document, id) {
-            on_match(id)?;
-            *count += 1;
-            if limit > 0 && *count >= limit {
-                return Ok(true);
-            }
-        }
-        has_matching_ancestor || ancestor.matches(document, id)
-    } else {
-        has_matching_ancestor
-    };
-
-    let mut child = document.node(id).first_child;
+    stack: &mut SmallVec<[(NodeId, bool); 64]>,
+) {
+    let mut child = document.node(parent).last_child;
     while let Some(current) = child {
-        let next = document.node(current).next_sibling;
-        if visit_descendant_pair_node(
-            document,
-            current,
-            child_has_matching_ancestor,
-            ancestor,
-            target,
-            limit,
-            on_match,
-            count,
-        )? {
-            return Ok(true);
-        }
-        child = next;
+        stack.push((current, has_matching_ancestor));
+        child = document.node(current).prev_sibling;
     }
-    Ok(false)
 }
 
 fn push_fast_selector_part<'a>(

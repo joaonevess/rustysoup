@@ -2366,17 +2366,18 @@ impl ParseOnlyFilter {
         parent: NodeId,
         out: &mut Document,
     ) -> PyResult<()> {
-        let mut child = source.node(parent).first_child;
-        while let Some(current) = child {
+        let mut stack = Vec::with_capacity(32);
+        push_children_reverse(source, parent, &mut stack);
+
+        while let Some(current) = stack.pop() {
             if self.matches_element(py, source, current)?
                 || self.matches_text(py, source, current)?
             {
                 let cloned = out.clone_detached_from(source, current);
                 out.append_existing(out.root, cloned);
             } else {
-                self.clone_matching_children(py, source, current, out)?;
+                push_children_reverse(source, current, &mut stack);
             }
-            child = source.node(current).next_sibling;
         }
         Ok(())
     }
@@ -2462,6 +2463,14 @@ impl ParseOnlyMatcher {
             Self::Regex(regex) => Ok(regex.is_match(value)),
             Self::Callable(callable) => callable.bind(py).call1((value,))?.is_truthy(),
         }
+    }
+}
+
+fn push_children_reverse(document: &Document, parent: NodeId, stack: &mut Vec<NodeId>) {
+    let mut child = document.node(parent).last_child;
+    while let Some(current) = child {
+        stack.push(current);
+        child = document.node(current).prev_sibling;
     }
 }
 
