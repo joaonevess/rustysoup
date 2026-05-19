@@ -8,7 +8,7 @@ use crate::shared::{SharedDocument, read_document, write_document};
 use crate::soup::{
     append_nodes_to_py_list, collect_string_nodes, collect_string_values, find_all_compat,
     find_all_compat_in_nodes, find_all_compat_node_ids, find_first_compat, nodes_to_py_public,
-    text_type_selection_from_call, try_fast_find_all_into_py_list,
+    select_all_detached, text_type_selection_from_call, try_fast_find_all_into_py_list,
 };
 use crate::string::NavigableString;
 use pyo3::IntoPyObjectExt;
@@ -836,16 +836,14 @@ impl Tag {
     #[pyo3(signature = (selector, namespaces = None, limit = 0, **kwargs))]
     fn select(
         &self,
+        py: Python<'_>,
         selector: &str,
         namespaces: Option<&Bound<'_, PyAny>>,
         limit: usize,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Tag>> {
         let _ = (namespaces, kwargs);
-        let ids = {
-            let document = read_document(&self.document);
-            matcher::select_all(&document, self.id, false, selector, limit)?
-        };
+        let ids = select_all_detached(py, &self.document, self.id, false, selector, limit)?;
         Ok(ids
             .into_iter()
             .map(|id| Tag::new(Arc::clone(&self.document), id))
@@ -864,25 +862,23 @@ impl Tag {
     ) -> PyResult<()> {
         let _ = (namespaces, kwargs);
         let out = result_set.cast::<PyList>()?;
-        let document = read_document(&self.document);
-        matcher::select_all_into(&document, self.id, false, selector, limit, |id| {
+        let ids = select_all_detached(py, &self.document, self.id, false, selector, limit)?;
+        for id in ids {
             out.append(Tag::new(Arc::clone(&self.document), id).into_py_any(py)?)?;
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     #[pyo3(signature = (selector, namespaces = None, **kwargs))]
     fn select_one(
         &self,
+        py: Python<'_>,
         selector: &str,
         namespaces: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Tag>> {
         let _ = (namespaces, kwargs);
-        let ids = {
-            let document = read_document(&self.document);
-            matcher::select_all(&document, self.id, false, selector, 1)?
-        };
+        let ids = select_all_detached(py, &self.document, self.id, false, selector, 1)?;
         Ok(ids
             .into_iter()
             .next()

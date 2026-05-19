@@ -1181,16 +1181,15 @@ impl Soup {
     #[pyo3(signature = (selector, namespaces = None, limit = 0, **kwargs))]
     fn select(
         &self,
+        py: Python<'_>,
         selector: &str,
         namespaces: Option<&Bound<'_, PyAny>>,
         limit: usize,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Tag>> {
         let _ = (namespaces, kwargs);
-        let ids = {
-            let document = read_document(&self.document);
-            matcher::select_all(&document, document.root, false, selector, limit)?
-        };
+        let root = read_document(&self.document).root;
+        let ids = select_all_detached(py, &self.document, root, false, selector, limit)?;
         Ok(ids
             .into_iter()
             .map(|id| Tag::new(Arc::clone(&self.document), id))
@@ -1209,25 +1208,25 @@ impl Soup {
     ) -> PyResult<()> {
         let _ = (namespaces, kwargs);
         let out = result_set.cast::<PyList>()?;
-        let document = read_document(&self.document);
-        matcher::select_all_into(&document, document.root, false, selector, limit, |id| {
+        let root = read_document(&self.document).root;
+        let ids = select_all_detached(py, &self.document, root, false, selector, limit)?;
+        for id in ids {
             out.append(Tag::new(Arc::clone(&self.document), id).into_py_any(py)?)?;
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     #[pyo3(signature = (selector, namespaces = None, **kwargs))]
     fn select_one(
         &self,
+        py: Python<'_>,
         selector: &str,
         namespaces: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Tag>> {
         let _ = (namespaces, kwargs);
-        let ids = {
-            let document = read_document(&self.document);
-            matcher::select_all(&document, document.root, false, selector, 1)?
-        };
+        let root = read_document(&self.document).root;
+        let ids = select_all_detached(py, &self.document, root, false, selector, 1)?;
         Ok(ids
             .into_iter()
             .next()
@@ -1970,6 +1969,22 @@ fn compat_candidate_matches(
     }
 
     Ok(false)
+}
+
+pub(crate) fn select_all_detached(
+    py: Python<'_>,
+    document: &SharedDocument,
+    root: NodeId,
+    include_root: bool,
+    selector: &str,
+    limit: usize,
+) -> PyResult<Vec<NodeId>> {
+    let document = Arc::clone(document);
+    let selector = selector.to_string();
+    py.detach(move || {
+        let document = read_document(&document);
+        matcher::select_all(&document, root, include_root, &selector, limit)
+    })
 }
 
 enum MarkupInput {
