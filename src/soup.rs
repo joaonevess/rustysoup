@@ -1495,15 +1495,40 @@ pub(crate) fn find_all_compat_node_ids(
         return Ok(results);
     }
 
-    let candidates = {
-        let document = read_document(document);
-        if recursive {
-            document.descendant_nodes(root, false)
-        } else {
-            document.child_nodes(root)
-        }
+    let text_alias = if let Some(kwargs) = kwargs {
+        kwargs.get_item("text")?
+    } else {
+        None
     };
-    find_all_compat_node_ids_in_nodes(py, document, candidates, name, attrs, string, limit, kwargs)
+    let string = string.or(text_alias.as_ref());
+    let attr_filters = collect_attr_filters(attrs, kwargs)?;
+    let name_is_absent = name.is_none_or(|value| value.is_none());
+    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
+    let mut results = Vec::new();
+    let mut current = {
+        let document = read_document(document);
+        document.node(root).first_child
+    };
+
+    while let Some(id) = current {
+        let next = {
+            let document = read_document(document);
+            if recursive {
+                document.next_in_subtree(root, id)
+            } else {
+                document.node(id).next_sibling
+            }
+        };
+        if compat_candidate_matches(py, document, id, name, &attr_filters, string, wants_strings)? {
+            results.push(id);
+        }
+        if limit.is_some_and(|value| value > 0 && results.len() >= value) {
+            break;
+        }
+        current = next;
+    }
+
+    Ok(results)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1873,58 +1898,8 @@ pub(crate) fn find_all_compat_node_ids_in_nodes(
     let mut results = Vec::new();
 
     for id in candidates {
-        let is_matchable_node = {
-            let document = read_document(document);
-            document.is_element(id) || matches!(document.node(id).node_type, NodeType::Document)
-        };
-        if is_matchable_node {
-            if wants_strings {
-                continue;
-            }
-            if !matches_name_filter(name, document, id)? {
-                continue;
-            }
-            if !matches_attr_filters(py, document, id, &attr_filters)? {
-                continue;
-            }
-            if let Some(string_filter) = string {
-                let (string_id, value) = {
-                    let document = read_document(document);
-                    let Some(string_id) = document.tag_string_node(id) else {
-                        continue;
-                    };
-                    let Some(value) = document.node_string(string_id) else {
-                        continue;
-                    };
-                    (string_id, value.to_string())
-                };
-                if !matches_string_node_filter(
-                    py,
-                    document,
-                    string_id,
-                    Some(&value),
-                    string_filter,
-                )? {
-                    continue;
-                }
-            }
+        if compat_candidate_matches(py, document, id, name, &attr_filters, string, wants_strings)? {
             results.push(id);
-        } else if wants_strings {
-            let value = {
-                let document = read_document(document);
-                if !document.is_text_like(id) {
-                    continue;
-                }
-                let Some(value) = document.node_string(id) else {
-                    continue;
-                };
-                value.to_string()
-            };
-            if let Some(string_filter) = string
-                && matches_string_node_filter(py, document, id, Some(&value), string_filter)?
-            {
-                results.push(id);
-            }
         }
 
         if limit.is_some_and(|value| value > 0 && results.len() >= value) {
@@ -1933,6 +1908,68 @@ pub(crate) fn find_all_compat_node_ids_in_nodes(
     }
 
     Ok(results)
+}
+
+fn compat_candidate_matches(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    name: Option<&Bound<'_, PyAny>>,
+    attr_filters: &[(String, Bound<'_, PyAny>)],
+    string: Option<&Bound<'_, PyAny>>,
+    wants_strings: bool,
+) -> PyResult<bool> {
+    let is_matchable_node = {
+        let document = read_document(document);
+        document.is_element(id) || matches!(document.node(id).node_type, NodeType::Document)
+    };
+    if is_matchable_node {
+        if wants_strings {
+            return Ok(false);
+        }
+        if !matches_name_filter(name, document, id)? {
+            return Ok(false);
+        }
+        if !matches_attr_filters(py, document, id, attr_filters)? {
+            return Ok(false);
+        }
+        if let Some(string_filter) = string {
+            let (string_id, value) = {
+                let document = read_document(document);
+                let Some(string_id) = document.tag_string_node(id) else {
+                    return Ok(false);
+                };
+                let Some(value) = document.node_string(string_id) else {
+                    return Ok(false);
+                };
+                (string_id, value.to_string())
+            };
+            if !matches_string_node_filter(py, document, string_id, Some(&value), string_filter)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+
+    if wants_strings {
+        let value = {
+            let document = read_document(document);
+            if !document.is_text_like(id) {
+                return Ok(false);
+            }
+            let Some(value) = document.node_string(id) else {
+                return Ok(false);
+            };
+            value.to_string()
+        };
+        if let Some(string_filter) = string
+            && matches_string_node_filter(py, document, id, Some(&value), string_filter)?
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 enum MarkupInput {
