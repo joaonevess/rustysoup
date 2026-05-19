@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 
 static SELECTOR_CACHE: OnceLock<Mutex<HashMap<String, selectors::CompiledSelector>>> =
     OnceLock::new();
+const SELECTOR_CACHE_MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct FindCriteria {
@@ -947,6 +948,9 @@ fn compile_cached(selector: &str) -> Result<selectors::CompiledSelector, ()> {
     }
 
     let compiled = selectors::compile(selector)?;
+    if cache.len() >= SELECTOR_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
     cache.insert(selector.to_string(), compiled.clone());
     Ok(compiled)
 }
@@ -1371,4 +1375,38 @@ fn parse_css_string(input: &str, start: usize, quote: char) -> Result<(usize, St
         value.push(ch);
     }
     Err(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clear_selector_cache() {
+        SELECTOR_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .clear();
+    }
+
+    fn selector_cache_len() -> usize {
+        SELECTOR_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn selector_cache_is_bounded() {
+        clear_selector_cache();
+
+        for index in 0..SELECTOR_CACHE_MAX_ENTRIES {
+            compile_cached(&format!("#cache-{index}")).unwrap();
+        }
+        assert_eq!(selector_cache_len(), SELECTOR_CACHE_MAX_ENTRIES);
+
+        compile_cached("#cache-overflow").unwrap();
+        assert_eq!(selector_cache_len(), 1);
+    }
 }
