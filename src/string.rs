@@ -1,7 +1,10 @@
 use crate::dom::{NodeId, NodeType};
 use crate::python::node_to_py;
 use crate::shared::{SharedDocument, read_document, write_document};
-use crate::soup::{find_all_compat_in_nodes, find_all_compat_parent_nodes};
+use crate::soup::{
+    SiblingDirection, find_all_compat_in_nodes, find_all_compat_parent_nodes,
+    find_all_compat_sibling_nodes,
+};
 use crate::tag::{
     Tag, extract_rustysoup_string, insert_string_after, insert_string_before, insert_tag_after,
     insert_tag_before,
@@ -587,11 +590,11 @@ impl NavigableString {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        let nodes = read_document(&self.document).sibling_nodes_after(self.id);
-        find_all_compat_in_nodes(
+        find_all_compat_sibling_nodes(
             py,
             &self.document,
-            nodes,
+            self.id,
+            SiblingDirection::Next,
             name,
             attrs,
             string,
@@ -674,11 +677,11 @@ impl NavigableString {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        let nodes = read_document(&self.document).sibling_nodes_before(self.id);
-        find_all_compat_in_nodes(
+        find_all_compat_sibling_nodes(
             py,
             &self.document,
-            nodes,
+            self.id,
+            SiblingDirection::Previous,
             name,
             attrs,
             string,

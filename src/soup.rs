@@ -1953,6 +1953,71 @@ pub(crate) fn find_all_compat_parent_nodes(
     Ok(results)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SiblingDirection {
+    Next,
+    Previous,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_all_compat_sibling_nodes(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    direction: SiblingDirection,
+    name: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'_, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let text_alias = if let Some(kwargs) = kwargs {
+        kwargs.get_item("text")?
+    } else {
+        None
+    };
+    let string = string.or(text_alias.as_ref());
+    let attr_filters = collect_attr_filters(attrs, kwargs)?;
+    let name_is_absent = name.is_none_or(|value| value.is_none());
+    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
+    let mut results = Vec::new();
+    let mut sibling = {
+        let document = read_document(document);
+        let node = document.node(id);
+        match direction {
+            SiblingDirection::Next => node.next_sibling,
+            SiblingDirection::Previous => node.prev_sibling,
+        }
+    };
+
+    while let Some(current) = sibling {
+        sibling = {
+            let document = read_document(document);
+            let node = document.node(current);
+            match direction {
+                SiblingDirection::Next => node.next_sibling,
+                SiblingDirection::Previous => node.prev_sibling,
+            }
+        };
+        if compat_candidate_matches(
+            py,
+            document,
+            current,
+            name,
+            &attr_filters,
+            string,
+            wants_strings,
+        )? {
+            results.push(node_to_py(py, document, current)?);
+        }
+        if limit.is_some_and(|value| value > 0 && results.len() >= value) {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
 fn compat_candidate_matches(
     py: Python<'_>,
     document: &SharedDocument,

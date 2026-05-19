@@ -6,9 +6,10 @@ use crate::python::{
 };
 use crate::shared::{SharedDocument, read_document, write_document};
 use crate::soup::{
-    append_nodes_to_py_list, collect_string_nodes, collect_string_values, find_all_compat,
-    find_all_compat_in_nodes, find_all_compat_node_ids, find_all_compat_parent_nodes,
-    find_first_compat, nodes_to_py_public, select_all_detached, text_type_selection_from_call,
+    SiblingDirection, append_nodes_to_py_list, collect_string_nodes, collect_string_values,
+    find_all_compat, find_all_compat_in_nodes, find_all_compat_node_ids,
+    find_all_compat_parent_nodes, find_all_compat_sibling_nodes, find_first_compat,
+    nodes_to_py_public, select_all_detached, text_type_selection_from_call,
     try_fast_find_all_into_py_list,
 };
 use crate::string::NavigableString;
@@ -1439,11 +1440,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        let nodes = read_document(&self.document).sibling_nodes_after(self.id);
-        find_all_compat_in_nodes(
+        find_all_compat_sibling_nodes(
             py,
             &self.document,
-            nodes,
+            self.id,
+            SiblingDirection::Next,
             name,
             attrs,
             string,
@@ -1546,11 +1547,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        let nodes = read_document(&self.document).sibling_nodes_before(self.id);
-        find_all_compat_in_nodes(
+        find_all_compat_sibling_nodes(
             py,
             &self.document,
-            nodes,
+            self.id,
+            SiblingDirection::Previous,
             name,
             attrs,
             string,
