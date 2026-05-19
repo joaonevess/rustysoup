@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,3 +49,29 @@ def test_invalid_selector_error_message_is_clear():
     message = str(exc_info.value)
     assert "Invalid CSS selector" in message
     assert "main a[href" in message
+
+
+def test_special_string_conversion_reuses_cached_wrapper_class(monkeypatch):
+    first = BeautifulSoup("<script>s</script><style>c</style>", "html.parser")
+    wrapper_classes = [
+        rustysoup.NavigableString,
+        rustysoup.Comment,
+        rustysoup.CData,
+        rustysoup.Declaration,
+        rustysoup.Doctype,
+        rustysoup.ProcessingInstruction,
+        rustysoup.TemplateString,
+    ]
+
+    for cls in wrapper_classes:
+        assert isinstance(first.new_string("one", cls), cls)
+    assert isinstance(first.script.string, rustysoup.Script)
+    assert isinstance(first.style.string, rustysoup.Stylesheet)
+
+    monkeypatch.setitem(sys.modules, "rustysoup", object())
+
+    second = BeautifulSoup("<script>s</script><style>c</style>", "html.parser")
+    for cls in wrapper_classes:
+        assert isinstance(second.new_string("two", cls), cls)
+    assert isinstance(second.script.string, rustysoup.Script)
+    assert isinstance(second.style.string, rustysoup.Stylesheet)

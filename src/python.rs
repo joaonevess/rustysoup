@@ -5,8 +5,19 @@ use crate::tag::Tag;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyString};
 use std::sync::Arc;
+
+static NAVIGABLE_STRING_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static COMMENT_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DOCTYPE_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static PROCESSING_INSTRUCTION_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SCRIPT_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static STYLESHEET_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static CDATA_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DECLARATION_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TEMPLATE_STRING_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 pub(crate) fn node_to_py(
     py: Python<'_>,
@@ -35,22 +46,32 @@ pub(crate) fn node_to_py(
         0 => Tag::new(Arc::clone(document), id).into_py_any(py),
         1..=9 => {
             let inner = NavigableString::new(Arc::clone(document), id).into_py_any(py)?;
-            let rustysoup = py.import("rustysoup")?;
             let cls = match node_kind {
-                2 => rustysoup.getattr("Comment")?,
-                3 => rustysoup.getattr("Doctype")?,
-                4 => rustysoup.getattr("ProcessingInstruction")?,
-                5 => rustysoup.getattr("Script")?,
-                6 => rustysoup.getattr("Stylesheet")?,
-                7 => rustysoup.getattr("CData")?,
-                8 => rustysoup.getattr("Declaration")?,
-                9 => rustysoup.getattr("TemplateString")?,
-                _ => rustysoup.getattr("NavigableString")?,
+                2 => rustysoup_class(py, &COMMENT_CLASS, "Comment")?,
+                3 => rustysoup_class(py, &DOCTYPE_CLASS, "Doctype")?,
+                4 => rustysoup_class(py, &PROCESSING_INSTRUCTION_CLASS, "ProcessingInstruction")?,
+                5 => rustysoup_class(py, &SCRIPT_CLASS, "Script")?,
+                6 => rustysoup_class(py, &STYLESHEET_CLASS, "Stylesheet")?,
+                7 => rustysoup_class(py, &CDATA_CLASS, "CData")?,
+                8 => rustysoup_class(py, &DECLARATION_CLASS, "Declaration")?,
+                9 => rustysoup_class(py, &TEMPLATE_STRING_CLASS, "TemplateString")?,
+                _ => rustysoup_class(py, &NAVIGABLE_STRING_CLASS, "NavigableString")?,
             };
             Ok(cls.call1((inner,))?.unbind())
         }
         _ => String::new().into_py_any(py),
     }
+}
+
+fn rustysoup_class<'py>(
+    py: Python<'py>,
+    cell: &'static PyOnceLock<Py<PyAny>>,
+    name: &str,
+) -> PyResult<&'py Bound<'py, PyAny>> {
+    cell.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("rustysoup")?.getattr(name)?.unbind())
+    })
+    .map(|cls| cls.bind(py))
 }
 
 pub(crate) fn py_encode_string<'py>(
