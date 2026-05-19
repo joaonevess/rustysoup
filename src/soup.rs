@@ -1858,24 +1858,7 @@ fn kwargs_has_key(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<boo
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_in_nodes(
-    py: Python<'_>,
-    document: &SharedDocument,
-    candidates: Vec<NodeId>,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
-    limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<Py<PyAny>>> {
-    let nodes = find_all_compat_node_ids_in_nodes(
-        py, document, candidates, name, attrs, string, limit, kwargs,
-    )?;
-    nodes_to_py_public(py, document, nodes)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_node_ids_in_nodes(
+fn find_all_compat_node_ids_in_nodes(
     py: Python<'_>,
     document: &SharedDocument,
     candidates: Vec<NodeId>,
@@ -1907,6 +1890,133 @@ pub(crate) fn find_all_compat_node_ids_in_nodes(
     }
 
     Ok(results)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DocumentOrderDirection {
+    Next,
+    Previous,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_all_compat_document_order_nodes(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    direction: DocumentOrderDirection,
+    name: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'_, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    if let Some(nodes) = try_fast_find_all_document_order(
+        py, document, id, direction, name, attrs, string, limit, kwargs,
+    )? {
+        return nodes_to_py_public(py, document, nodes);
+    }
+
+    if !limit.is_some_and(|value| value > 0) {
+        let candidates = {
+            let document = read_document(document);
+            match direction {
+                DocumentOrderDirection::Next => document.next_element_nodes(id),
+                DocumentOrderDirection::Previous => document.previous_element_nodes(id),
+            }
+        };
+        let nodes = find_all_compat_node_ids_in_nodes(
+            py, document, candidates, name, attrs, string, limit, kwargs,
+        )?;
+        return nodes_to_py_public(py, document, nodes);
+    }
+
+    let text_alias = if let Some(kwargs) = kwargs {
+        kwargs.get_item("text")?
+    } else {
+        None
+    };
+    let string = string.or(text_alias.as_ref());
+    let attr_filters = collect_attr_filters(attrs, kwargs)?;
+    let name_is_absent = name.is_none_or(|value| value.is_none());
+    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
+    let mut results = Vec::new();
+    let mut candidate = {
+        let document = read_document(document);
+        document_order_neighbor(&document, id, direction)
+    };
+
+    while let Some(current) = candidate {
+        candidate = {
+            let document = read_document(document);
+            document_order_neighbor(&document, current, direction)
+        };
+        if compat_candidate_matches(
+            py,
+            document,
+            current,
+            name,
+            &attr_filters,
+            string,
+            wants_strings,
+        )? {
+            results.push(node_to_py(py, document, current)?);
+        }
+        if limit.is_some_and(|value| value > 0 && results.len() >= value) {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_fast_find_all_document_order(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    direction: DocumentOrderDirection,
+    name: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'_, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Vec<NodeId>>> {
+    if string.is_some() || kwargs_has_key(kwargs, "text")? {
+        return Ok(None);
+    }
+    let Some(name_filter) = SimpleNameFilter::from_py(name)? else {
+        return Ok(None);
+    };
+    let attr_filters = collect_attr_filters(attrs, kwargs)?;
+    let Some(attr_filters) = SimpleAttrFilter::from_filters(py, &attr_filters)? else {
+        return Ok(None);
+    };
+
+    let document = read_document(document);
+    let mut out = Vec::new();
+    let mut candidate = document_order_neighbor(&document, id, direction);
+    while let Some(current) = candidate {
+        if fast_matches(&document, current, &name_filter, &attr_filters) {
+            out.push(current);
+            if limit.is_some_and(|value| value > 0 && out.len() >= value) {
+                break;
+            }
+        }
+        candidate = document_order_neighbor(&document, current, direction);
+    }
+
+    Ok(Some(out))
+}
+
+fn document_order_neighbor(
+    document: &Document,
+    id: NodeId,
+    direction: DocumentOrderDirection,
+) -> Option<NodeId> {
+    match direction {
+        DocumentOrderDirection::Next => document.next_element_node(id),
+        DocumentOrderDirection::Previous => document.previous_element_node(id),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
