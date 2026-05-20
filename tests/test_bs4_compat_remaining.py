@@ -336,6 +336,49 @@ def test_zero_item_insert_and_replace_match_bs4():
     assert str(rusty) == str(bs4)
 
 
+def test_self_mutation_guards_match_bs4_and_preserve_tree():
+    def assert_value_error_matches(rusty_call, bs4_call):
+        with pytest.raises(ValueError) as rusty_error:
+            rusty_call()
+        with pytest.raises(ValueError) as bs4_error:
+            bs4_call()
+        assert str(rusty_error.value) == str(bs4_error.value)
+
+    cases = [
+        (lambda soup: soup.p.insert_before(soup.p), lambda soup: soup.p.insert_before(soup.p)),
+        (lambda soup: soup.p.insert_after(soup.p), lambda soup: soup.p.insert_after(soup.p)),
+        (lambda soup: soup.p.append(soup.p), lambda soup: soup.p.append(soup.p)),
+        (lambda soup: soup.p.insert(0, soup.p), lambda soup: soup.p.insert(0, soup.p)),
+        (
+            lambda soup: soup.p.string.insert_before(soup.p.string),
+            lambda soup: soup.p.string.insert_before(soup.p.string),
+        ),
+        (
+            lambda soup: soup.p.string.insert_after(soup.p.string),
+            lambda soup: soup.p.string.insert_after(soup.p.string),
+        ),
+    ]
+    for rusty_call, bs4_call in cases:
+        rusty = BeautifulSoup("<div><p>one</p></div>", "html.parser")
+        bs4 = Bs4BeautifulSoup("<div><p>one</p></div>", "html.parser")
+        assert_value_error_matches(lambda: rusty_call(rusty), lambda: bs4_call(bs4))
+        assert str(rusty) == str(bs4)
+
+    rusty = BeautifulSoup("<div><p>one</p></div>", "html.parser")
+    bs4 = Bs4BeautifulSoup("<div><p>one</p></div>", "html.parser")
+    assert str(rusty.p.replace_with(rusty.p)) == str(bs4.p.replace_with(bs4.p))
+    assert str(rusty) == str(bs4)
+
+    rusty = BeautifulSoup("<p>one</p>", "html.parser")
+    bs4 = Bs4BeautifulSoup("<p>one</p>", "html.parser")
+    rusty_text = rusty.p.string
+    bs4_text = bs4.p.string
+    assert str(rusty_text.replace_with(rusty_text)) == str(
+        bs4_text.replace_with(bs4_text)
+    )
+    assert str(rusty) == str(bs4)
+
+
 def test_negative_insert_index_errors_match_bs4():
     rusty = BeautifulSoup("<p>ab</p>", "html.parser")
     bs4 = Bs4BeautifulSoup("<p>ab</p>", "html.parser")

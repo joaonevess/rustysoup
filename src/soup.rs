@@ -1,4 +1,4 @@
-use crate::dom::{Document, NodeId, NodeType};
+use crate::dom::{Document, InsertTarget, NodeId, NodeType};
 use crate::errors::internal_panic;
 use crate::matcher::{self, FindCriteria};
 use crate::parser::{parse_html, parse_html_document};
@@ -11,10 +11,7 @@ use crate::search::{
     normalize_kwarg_attr_name, try_fast_find_all_into_py_list,
 };
 use crate::shared::{SharedDocument, read_document, shared_document};
-use crate::tag::{
-    AttributeDict, Tag, append_string_to_parent, append_tag_to_parent, extract_rustysoup_string,
-    insert_string_into_parent, insert_tag_into_parent,
-};
+use crate::tag::{AttributeDict, Tag, extract_rustysoup_node, insert_py_item_to_py};
 use encoding_rs::Encoding;
 use pyo3::IntoPyObjectExt;
 use pyo3::basic::CompareOp;
@@ -467,21 +464,13 @@ impl Soup {
 
     fn append(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let root = read_document(&self.document).root;
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = append_tag_to_parent(&self.document, root, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = append_string_to_parent(py, item, &self.document, root, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = crate::shared::write_document(&self.document).append_text(root, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::AppendTo(root),
             "rustysoup currently supports appending strings, NavigableString, and Tag objects",
-        ))
+        )
     }
 
     fn extend(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
@@ -495,40 +484,28 @@ impl Soup {
 
     fn insert(&self, py: Python<'_>, index: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let root = read_document(&self.document).root;
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_into_parent(&self.document, root, index, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_into_parent(py, item, &self.document, root, index, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = crate::shared::write_document(&self.document).insert_text(root, index, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::AtIndex {
+                parent: root,
+                index,
+            },
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 
     fn index(&self, item: &Bound<'_, PyAny>) -> PyResult<usize> {
         let root = read_document(&self.document).root;
-        let target = if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            if !Arc::ptr_eq(&self.document, &tag.document) {
-                return Err(PyValueError::new_err("Tag.index: element not in tag"));
-            }
-            tag.id
-        } else if let Some(string) = extract_rustysoup_string(item) {
-            if !Arc::ptr_eq(&self.document, &string.document) {
-                return Err(PyValueError::new_err("Tag.index: element not in tag"));
-            }
-            string.id
-        } else {
+        let Some(target) = extract_rustysoup_node(item) else {
             return Err(PyValueError::new_err("Tag.index: element not in tag"));
         };
+        if !Arc::ptr_eq(&self.document, target.document()) {
+            return Err(PyValueError::new_err("Tag.index: element not in tag"));
+        }
         read_document(&self.document)
-            .child_index(root, target)
+            .child_index(root, target.id())
             .ok_or_else(|| PyValueError::new_err("Tag.index: element not in tag"))
     }
 

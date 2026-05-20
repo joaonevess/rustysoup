@@ -1,16 +1,12 @@
-use crate::dom::{NodeId, NodeType};
+use crate::dom::{InsertTarget, NodeId, NodeType};
 use crate::python::{node_to_py, nodes_to_py};
 use crate::search::{
     RelativeSearch, find_all_compat_relative_nodes, find_first_compat_relative_node,
 };
 use crate::shared::{SharedDocument, read_document, write_document};
-use crate::tag::{
-    Tag, extract_rustysoup_string, insert_string_after, insert_string_before, insert_tag_after,
-    insert_tag_before,
-};
+use crate::tag::{Tag, insert_py_item, insert_py_item_to_py, py_item_is_node, wrap_node_with_tag};
 use pyo3::IntoPyObjectExt;
 use pyo3::basic::CompareOp;
-use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -710,37 +706,24 @@ impl NavigableString {
         self.find_previous_siblings(py, name, attrs, string, limit, kwargs)
     }
 
-    fn wrap(&self, wrapper: PyRef<'_, Tag>) -> Tag {
-        let id = if Arc::ptr_eq(&self.document, &wrapper.document) {
-            write_document(&self.document).insert_before_existing(self.id, wrapper.id);
-            write_document(&self.document).append_existing(wrapper.id, self.id);
-            wrapper.id
-        } else {
-            let source = read_document(&wrapper.document);
-            write_document(&self.document).wrap_with_clone_from(self.id, &source, wrapper.id)
-        };
-        Tag::new(Arc::clone(&self.document), id)
+    fn wrap(&self, wrapper: PyRef<'_, Tag>) -> PyResult<Tag> {
+        let id = wrap_node_with_tag(&self.document, self.id, &wrapper)?;
+        Ok(Tag::new(Arc::clone(&self.document), id))
     }
 
     fn replace_with(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let _ = insert_tag_before(&self.document, self.id, &tag);
-            write_document(&self.document).detach(self.id);
+        if py_item_is_node(item, &self.document, self.id) {
             return self.clone().into_py_any(py);
         }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let _ = insert_string_before(py, item, &self.document, self.id, &string)?;
-            write_document(&self.document).detach(self.id);
-            return self.clone().into_py_any(py);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            write_document(&self.document).insert_text_before(self.id, text);
-            write_document(&self.document).detach(self.id);
-            return self.clone().into_py_any(py);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item(
+            py,
+            item,
+            &self.document,
+            InsertTarget::Before(self.id),
             "rustysoup currently supports replacing with strings and Tag objects",
-        ))
+        )?;
+        write_document(&self.document).detach(self.id);
+        self.clone().into_py_any(py)
     }
 
     fn extract(&self) -> Self {
@@ -753,38 +736,22 @@ impl NavigableString {
     }
 
     fn insert_before(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_before(&self.document, self.id, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_before(py, item, &self.document, self.id, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).insert_text_before(self.id, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::Before(self.id),
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 
     fn insert_after(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_after(&self.document, self.id, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_after(py, item, &self.document, self.id, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).insert_text_after(self.id, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::After(self.id),
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 }

@@ -103,7 +103,14 @@ impl ElementData {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InsertTarget {
+    AppendTo(NodeId),
+    AtIndex { parent: NodeId, index: usize },
+    Before(NodeId),
+    After(NodeId),
+}
+
 pub struct Document {
     pub nodes: Vec<Node>,
     pub namespaces: Option<HashMap<NodeId, Namespace>>,
@@ -194,37 +201,12 @@ impl Document {
     }
 
     pub fn append_text(&mut self, parent: NodeId, text: String) -> NodeId {
-        let id = self.push_node(Node::new(NodeType::Text(CompactString::from(text))));
-        self.append_existing(parent, id);
-        id
+        self.insert_text_at(InsertTarget::AppendTo(parent), text)
     }
 
-    pub fn insert_text(&mut self, parent: NodeId, index: usize, text: String) -> NodeId {
+    pub(crate) fn insert_text_at(&mut self, target: InsertTarget, text: String) -> NodeId {
         let id = self.push_node(Node::new(NodeType::Text(CompactString::from(text))));
-        self.insert_existing(parent, index, id);
-        id
-    }
-
-    pub fn insert_text_before(&mut self, sibling: NodeId, text: String) -> NodeId {
-        let id = self.push_node(Node::new(NodeType::Text(CompactString::from(text))));
-        self.insert_before_existing(sibling, id);
-        id
-    }
-
-    pub fn insert_text_after(&mut self, sibling: NodeId, text: String) -> NodeId {
-        let id = self.push_node(Node::new(NodeType::Text(CompactString::from(text))));
-        self.insert_after_existing(sibling, id);
-        id
-    }
-
-    pub fn append_clone_from(
-        &mut self,
-        parent: NodeId,
-        source: &Document,
-        source_id: NodeId,
-    ) -> NodeId {
-        let id = self.clone_detached_subtree(source, source_id);
-        self.append_existing(parent, id);
+        self.insert_existing_at(target, id);
         id
     }
 
@@ -232,37 +214,14 @@ impl Document {
         self.clone_detached_subtree(source, source_id)
     }
 
-    pub fn insert_clone_from(
+    pub(crate) fn insert_clone_at(
         &mut self,
-        parent: NodeId,
-        index: usize,
+        target: InsertTarget,
         source: &Document,
         source_id: NodeId,
     ) -> NodeId {
         let id = self.clone_detached_subtree(source, source_id);
-        self.insert_existing(parent, index, id);
-        id
-    }
-
-    pub fn insert_clone_before_from(
-        &mut self,
-        sibling: NodeId,
-        source: &Document,
-        source_id: NodeId,
-    ) -> NodeId {
-        let id = self.clone_detached_subtree(source, source_id);
-        self.insert_before_existing(sibling, id);
-        id
-    }
-
-    pub fn insert_clone_after_from(
-        &mut self,
-        sibling: NodeId,
-        source: &Document,
-        source_id: NodeId,
-    ) -> NodeId {
-        let id = self.clone_detached_subtree(source, source_id);
-        self.insert_after_existing(sibling, id);
+        self.insert_existing_at(target, id);
         id
     }
 
@@ -411,6 +370,19 @@ impl Document {
     }
 
     pub fn append_existing(&mut self, parent: NodeId, child: NodeId) {
+        self.insert_existing_at(InsertTarget::AppendTo(parent), child);
+    }
+
+    pub(crate) fn insert_existing_at(&mut self, target: InsertTarget, child: NodeId) {
+        match target {
+            InsertTarget::AppendTo(parent) => self.append_existing_to_parent(parent, child),
+            InsertTarget::AtIndex { parent, index } => self.insert_existing(parent, index, child),
+            InsertTarget::Before(sibling) => self.insert_before_existing(sibling, child),
+            InsertTarget::After(sibling) => self.insert_after_existing(sibling, child),
+        }
+    }
+
+    fn append_existing_to_parent(&mut self, parent: NodeId, child: NodeId) {
         self.detach(child);
         self.nodes[child.index()].parent = Some(parent);
 
@@ -811,6 +783,17 @@ impl Document {
             parent = self.node(current).parent;
         }
         out
+    }
+
+    pub(crate) fn is_ancestor_of(&self, ancestor: NodeId, id: NodeId) -> bool {
+        let mut parent = self.node(id).parent;
+        while let Some(current) = parent {
+            if current == ancestor {
+                return true;
+            }
+            parent = self.node(current).parent;
+        }
+        false
     }
 
     pub fn next_element_node(&self, id: NodeId) -> Option<NodeId> {

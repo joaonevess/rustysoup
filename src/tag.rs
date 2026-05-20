@@ -1,4 +1,4 @@
-use crate::dom::{NodeId, NodeType, is_void_element};
+use crate::dom::{InsertTarget, NodeId, NodeType, is_void_element};
 use crate::matcher;
 use crate::python::{
     node_to_py, nodes_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
@@ -618,21 +618,13 @@ impl Tag {
     }
 
     fn append(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = append_tag_to_parent(&self.document, self.id, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = append_string_to_parent(py, item, &self.document, self.id, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).append_text(self.id, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::AppendTo(self.id),
             "rustysoup currently supports appending strings, NavigableString, and Tag objects",
-        ))
+        )
     }
 
     fn extend(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
@@ -645,33 +637,27 @@ impl Tag {
     }
 
     fn insert(&self, py: Python<'_>, index: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_into_parent(&self.document, self.id, index, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_into_parent(py, item, &self.document, self.id, index, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).insert_text(self.id, index, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::AtIndex {
+                parent: self.id,
+                index,
+            },
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 
     fn index(&self, item: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let target = if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            tag.id
-        } else if let Some(string) = extract_rustysoup_string(item) {
-            string.id
-        } else {
+        let Some(target) = extract_rustysoup_node(item) else {
             return Err(PyValueError::new_err("Tag.index: element not in tag"));
         };
+        if !Arc::ptr_eq(&self.document, target.document()) {
+            return Err(PyValueError::new_err("Tag.index: element not in tag"));
+        }
         read_document(&self.document)
-            .child_index(self.id, target)
+            .child_index(self.id, target.id())
             .ok_or_else(|| PyValueError::new_err("Tag.index: element not in tag"))
     }
 
@@ -689,24 +675,18 @@ impl Tag {
     }
 
     fn replace_with(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let _ = insert_tag_before(&self.document, self.id, &tag);
-            write_document(&self.document).detach(self.id);
+        if py_item_is_node(item, &self.document, self.id) {
             return self.clone().into_py_any(py);
         }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let _ = insert_string_before(py, item, &self.document, self.id, &string)?;
-            write_document(&self.document).detach(self.id);
-            return self.clone().into_py_any(py);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            write_document(&self.document).insert_text_before(self.id, text);
-            write_document(&self.document).detach(self.id);
-            return self.clone().into_py_any(py);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item(
+            py,
+            item,
+            &self.document,
+            InsertTarget::Before(self.id),
             "rustysoup currently supports replacing with strings and Tag objects",
-        ))
+        )?;
+        write_document(&self.document).detach(self.id);
+        self.clone().into_py_any(py)
     }
 
     #[pyo3(name = "replaceWith")]
@@ -715,51 +695,28 @@ impl Tag {
     }
 
     fn insert_before(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_before(&self.document, self.id, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_before(py, item, &self.document, self.id, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).insert_text_before(self.id, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::Before(self.id),
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 
     fn insert_after(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
-            let id = insert_tag_after(&self.document, self.id, &tag);
-            return node_to_py(py, &self.document, id);
-        }
-        if let Some(string) = extract_rustysoup_string(item) {
-            let id = insert_string_after(py, item, &self.document, self.id, &string)?;
-            return node_to_py(py, &self.document, id);
-        }
-        if let Ok(text) = item.extract::<String>() {
-            let id = write_document(&self.document).insert_text_after(self.id, text);
-            return node_to_py(py, &self.document, id);
-        }
-        Err(PyTypeError::new_err(
+        insert_py_item_to_py(
+            py,
+            item,
+            &self.document,
+            InsertTarget::After(self.id),
             "rustysoup currently supports inserting strings and Tag objects",
-        ))
+        )
     }
 
-    fn wrap(&self, wrapper: PyRef<'_, Tag>) -> Tag {
-        let id = if Arc::ptr_eq(&self.document, &wrapper.document) {
-            write_document(&self.document).insert_before_existing(self.id, wrapper.id);
-            write_document(&self.document).append_existing(wrapper.id, self.id);
-            wrapper.id
-        } else {
-            let source = read_document(&wrapper.document);
-            write_document(&self.document).wrap_with_clone_from(self.id, &source, wrapper.id)
-        };
-        Tag::new(Arc::clone(&self.document), id)
+    fn wrap(&self, wrapper: PyRef<'_, Tag>) -> PyResult<Tag> {
+        let id = wrap_node_with_tag(&self.document, self.id, &wrapper)?;
+        Ok(Tag::new(Arc::clone(&self.document), id))
     }
 
     fn unwrap(&self) -> Tag {
@@ -1766,49 +1723,32 @@ fn tag_markup(document: &SharedDocument, id: NodeId) -> String {
     read_document(document).outer_html(id)
 }
 
-pub(crate) fn append_tag_to_parent(document: &SharedDocument, parent: NodeId, tag: &Tag) -> NodeId {
-    if Arc::ptr_eq(document, &tag.document) {
-        write_document(document).append_existing(parent, tag.id);
-        tag.id
-    } else {
-        let source = read_document(&tag.document);
-        write_document(document).append_clone_from(parent, &source, tag.id)
+pub(crate) enum RustyNode {
+    Tag(Tag),
+    String(NavigableString),
+}
+
+impl RustyNode {
+    pub(crate) fn id(&self) -> NodeId {
+        match self {
+            Self::Tag(tag) => tag.id,
+            Self::String(string) => string.id,
+        }
+    }
+
+    pub(crate) fn document(&self) -> &SharedDocument {
+        match self {
+            Self::Tag(tag) => &tag.document,
+            Self::String(string) => &string.document,
+        }
     }
 }
 
-pub(crate) fn insert_tag_into_parent(
-    document: &SharedDocument,
-    parent: NodeId,
-    index: usize,
-    tag: &Tag,
-) -> NodeId {
-    if Arc::ptr_eq(document, &tag.document) {
-        write_document(document).insert_existing(parent, index, tag.id);
-        tag.id
-    } else {
-        let source = read_document(&tag.document);
-        write_document(document).insert_clone_from(parent, index, &source, tag.id)
+pub(crate) fn extract_rustysoup_node(item: &Bound<'_, PyAny>) -> Option<RustyNode> {
+    if let Ok(tag) = item.extract::<PyRef<'_, Tag>>() {
+        return Some(RustyNode::Tag(tag.clone()));
     }
-}
-
-pub(crate) fn insert_tag_before(document: &SharedDocument, sibling: NodeId, tag: &Tag) -> NodeId {
-    if Arc::ptr_eq(document, &tag.document) {
-        write_document(document).insert_before_existing(sibling, tag.id);
-        tag.id
-    } else {
-        let source = read_document(&tag.document);
-        write_document(document).insert_clone_before_from(sibling, &source, tag.id)
-    }
-}
-
-pub(crate) fn insert_tag_after(document: &SharedDocument, sibling: NodeId, tag: &Tag) -> NodeId {
-    if Arc::ptr_eq(document, &tag.document) {
-        write_document(document).insert_after_existing(sibling, tag.id);
-        tag.id
-    } else {
-        let source = read_document(&tag.document);
-        write_document(document).insert_clone_after_from(sibling, &source, tag.id)
-    }
+    extract_rustysoup_string(item).map(RustyNode::String)
 }
 
 pub(crate) fn extract_rustysoup_string(item: &Bound<'_, PyAny>) -> Option<NavigableString> {
@@ -1822,77 +1762,143 @@ pub(crate) fn extract_rustysoup_string(item: &Bound<'_, PyAny>) -> Option<Naviga
         .map(|inner| inner.clone())
 }
 
-pub(crate) fn append_string_to_parent(
+pub(crate) fn py_item_is_node(
+    item: &Bound<'_, PyAny>,
+    document: &SharedDocument,
+    id: NodeId,
+) -> bool {
+    extract_rustysoup_node(item)
+        .as_ref()
+        .is_some_and(|node| Arc::ptr_eq(document, node.document()) && node.id() == id)
+}
+
+pub(crate) fn insert_py_item_to_py(
     py: Python<'_>,
     item: &Bound<'_, PyAny>,
     document: &SharedDocument,
-    parent: NodeId,
+    target: InsertTarget,
+    type_error: &'static str,
+) -> PyResult<Py<PyAny>> {
+    let id = insert_py_item(py, item, document, target, type_error)?;
+    node_to_py(py, document, id)
+}
+
+pub(crate) fn insert_py_item(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+    document: &SharedDocument,
+    target: InsertTarget,
+    type_error: &'static str,
+) -> PyResult<NodeId> {
+    if let Some(node) = extract_rustysoup_node(item) {
+        return insert_rustysoup_node(py, item, document, target, node);
+    }
+    if let Ok(text) = item.extract::<String>() {
+        return Ok(write_document(document).insert_text_at(target, text));
+    }
+    Err(PyTypeError::new_err(type_error))
+}
+
+pub(crate) fn wrap_node_with_tag(
+    document: &SharedDocument,
+    target: NodeId,
+    wrapper: &Tag,
+) -> PyResult<NodeId> {
+    if Arc::ptr_eq(document, &wrapper.document) {
+        validate_wrap_target(document, target, wrapper.id)?;
+        let mut document = write_document(document);
+        document.insert_existing_at(InsertTarget::Before(target), wrapper.id);
+        document.insert_existing_at(InsertTarget::AppendTo(wrapper.id), target);
+        Ok(wrapper.id)
+    } else {
+        let source = read_document(&wrapper.document);
+        Ok(write_document(document).wrap_with_clone_from(target, &source, wrapper.id))
+    }
+}
+
+fn insert_rustysoup_node(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+    document: &SharedDocument,
+    target: InsertTarget,
+    node: RustyNode,
+) -> PyResult<NodeId> {
+    match node {
+        RustyNode::Tag(tag) => insert_tag_at(document, target, &tag),
+        RustyNode::String(string) => insert_string_at(py, item, document, target, &string),
+    }
+}
+
+fn insert_tag_at(document: &SharedDocument, target: InsertTarget, tag: &Tag) -> PyResult<NodeId> {
+    if Arc::ptr_eq(document, &tag.document) {
+        validate_existing_node_insert(document, target, tag.id)?;
+        write_document(document).insert_existing_at(target, tag.id);
+        Ok(tag.id)
+    } else {
+        let source = read_document(&tag.document);
+        Ok(write_document(document).insert_clone_at(target, &source, tag.id))
+    }
+}
+
+fn insert_string_at(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+    document: &SharedDocument,
+    target: InsertTarget,
     string: &NavigableString,
 ) -> PyResult<NodeId> {
     let id = if Arc::ptr_eq(document, &string.document) {
-        write_document(document).append_existing(parent, string.id);
+        validate_existing_node_insert(document, target, string.id)?;
+        write_document(document).insert_existing_at(target, string.id);
         string.id
     } else {
         let source = read_document(&string.document);
-        write_document(document).append_clone_from(parent, &source, string.id)
+        write_document(document).insert_clone_at(target, &source, string.id)
     };
     update_python_string_inner(py, item, document, id)?;
     Ok(id)
 }
 
-pub(crate) fn insert_string_into_parent(
-    py: Python<'_>,
-    item: &Bound<'_, PyAny>,
+fn validate_existing_node_insert(
     document: &SharedDocument,
-    parent: NodeId,
-    index: usize,
-    string: &NavigableString,
-) -> PyResult<NodeId> {
-    let id = if Arc::ptr_eq(document, &string.document) {
-        write_document(document).insert_existing(parent, index, string.id);
-        string.id
-    } else {
-        let source = read_document(&string.document);
-        write_document(document).insert_clone_from(parent, index, &source, string.id)
-    };
-    update_python_string_inner(py, item, document, id)?;
-    Ok(id)
+    target: InsertTarget,
+    child: NodeId,
+) -> PyResult<()> {
+    let document = read_document(document);
+    match target {
+        InsertTarget::Before(sibling) if sibling == child => Err(PyValueError::new_err(
+            "Can't insert an element before itself.",
+        )),
+        InsertTarget::After(sibling) if sibling == child => Err(PyValueError::new_err(
+            "Can't insert an element after itself.",
+        )),
+        InsertTarget::AppendTo(parent) | InsertTarget::AtIndex { parent, .. }
+            if parent == child || document.is_ancestor_of(child, parent) =>
+        {
+            Err(PyValueError::new_err("Cannot insert a tag into itself."))
+        }
+        InsertTarget::Before(sibling) | InsertTarget::After(sibling)
+            if document.is_ancestor_of(child, sibling) =>
+        {
+            Err(PyValueError::new_err("Cannot insert a tag into itself."))
+        }
+        _ => Ok(()),
+    }
 }
 
-pub(crate) fn insert_string_before(
-    py: Python<'_>,
-    item: &Bound<'_, PyAny>,
+fn validate_wrap_target(
     document: &SharedDocument,
-    sibling: NodeId,
-    string: &NavigableString,
-) -> PyResult<NodeId> {
-    let id = if Arc::ptr_eq(document, &string.document) {
-        write_document(document).insert_before_existing(sibling, string.id);
-        string.id
-    } else {
-        let source = read_document(&string.document);
-        write_document(document).insert_clone_before_from(sibling, &source, string.id)
-    };
-    update_python_string_inner(py, item, document, id)?;
-    Ok(id)
-}
-
-pub(crate) fn insert_string_after(
-    py: Python<'_>,
-    item: &Bound<'_, PyAny>,
-    document: &SharedDocument,
-    sibling: NodeId,
-    string: &NavigableString,
-) -> PyResult<NodeId> {
-    let id = if Arc::ptr_eq(document, &string.document) {
-        write_document(document).insert_after_existing(sibling, string.id);
-        string.id
-    } else {
-        let source = read_document(&string.document);
-        write_document(document).insert_clone_after_from(sibling, &source, string.id)
-    };
-    update_python_string_inner(py, item, document, id)?;
-    Ok(id)
+    target: NodeId,
+    wrapper: NodeId,
+) -> PyResult<()> {
+    let document = read_document(document);
+    if target == wrapper
+        || document.is_ancestor_of(target, wrapper)
+        || document.is_ancestor_of(wrapper, target)
+    {
+        return Err(PyValueError::new_err("Cannot insert a tag into itself."));
+    }
+    Ok(())
 }
 
 fn update_python_string_inner(
