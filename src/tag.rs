@@ -1,18 +1,17 @@
 use crate::dom::{NodeId, NodeType, is_void_element};
 use crate::matcher;
 use crate::python::{
-    node_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
+    node_to_py, nodes_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
     render_outer_html_with_py_formatter_and_encoding, render_prettify_with_py_formatter,
 };
 use crate::search::{
-    DocumentOrderDirection, SiblingDirection, find_all_compat,
-    find_all_compat_document_order_nodes, find_all_compat_node_ids, find_all_compat_parent_nodes,
-    find_all_compat_sibling_nodes, find_first_compat, try_fast_find_all_into_py_list,
+    RelativeSearch, find_all_compat, find_all_compat_node_ids, find_all_compat_relative_nodes,
+    find_first_compat, find_first_compat_relative_node, try_fast_find_all_into_py_list,
 };
 use crate::shared::{SharedDocument, read_document, write_document};
 use crate::soup::{
-    append_nodes_to_py_list, collect_string_nodes, collect_string_values, nodes_to_py_public,
-    select_all_detached, text_type_selection_from_call,
+    append_nodes_to_py_list, collect_string_nodes, collect_string_values, select_all_detached,
+    text_type_selection_from_call,
 };
 use crate::string::NavigableString;
 use pyo3::IntoPyObjectExt;
@@ -419,7 +418,7 @@ impl Tag {
     #[getter]
     fn parents(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).parent_nodes(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "parentGenerator")]
@@ -430,7 +429,7 @@ impl Tag {
     #[getter]
     fn contents(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).child_nodes(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -446,7 +445,7 @@ impl Tag {
     #[getter]
     fn descendants(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).descendant_nodes(self.id, false);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "recursiveChildGenerator")]
@@ -479,13 +478,13 @@ impl Tag {
     #[getter]
     fn next_siblings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).sibling_nodes_after(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
     fn previous_siblings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).sibling_nodes_before(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -502,7 +501,7 @@ impl Tag {
     #[getter]
     fn next_elements(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).next_element_nodes(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "nextGenerator")]
@@ -524,7 +523,7 @@ impl Tag {
     #[getter]
     fn previous_elements(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).previous_element_nodes(self.id);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "previousGenerator")]
@@ -534,7 +533,7 @@ impl Tag {
 
     #[getter]
     fn strings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        nodes_to_py_public(
+        nodes_to_py(
             py,
             &self.document,
             collect_string_nodes(&self.document, self.id),
@@ -784,7 +783,7 @@ impl Tag {
     #[getter]
     fn self_and_descendants(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = read_document(&self.document).descendant_nodes(self.id, true);
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -792,7 +791,7 @@ impl Tag {
         let mut nodes = Vec::new();
         nodes.push(self.id);
         nodes.extend(read_document(&self.document).next_element_nodes(self.id));
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -800,7 +799,7 @@ impl Tag {
         let mut nodes = Vec::new();
         nodes.push(self.id);
         nodes.extend(read_document(&self.document).previous_element_nodes(self.id));
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -808,7 +807,7 @@ impl Tag {
         let mut nodes = Vec::new();
         nodes.push(self.id);
         nodes.extend(read_document(&self.document).sibling_nodes_after(self.id));
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -816,7 +815,7 @@ impl Tag {
         let mut nodes = Vec::new();
         nodes.push(self.id);
         nodes.extend(read_document(&self.document).sibling_nodes_before(self.id));
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -824,7 +823,7 @@ impl Tag {
         let mut nodes = Vec::new();
         nodes.push(self.id);
         nodes.extend(read_document(&self.document).parent_nodes(self.id));
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "nextSiblingGenerator")]
@@ -1102,10 +1101,16 @@ impl Tag {
         string: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        Ok(self
-            .find_all_next(py, name, attrs, string, Some(1), kwargs)?
-            .into_iter()
-            .next())
+        find_first_compat_relative_node(
+            py,
+            &self.document,
+            self.id,
+            RelativeSearch::NextElements,
+            name,
+            attrs,
+            string,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "findNext", signature = (
@@ -1142,11 +1147,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        find_all_compat_document_order_nodes(
+        find_all_compat_relative_nodes(
             py,
             &self.document,
             self.id,
-            DocumentOrderDirection::Next,
+            RelativeSearch::NextElements,
             name,
             attrs,
             string,
@@ -1189,10 +1194,16 @@ impl Tag {
         string: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        Ok(self
-            .find_all_previous(py, name, attrs, string, Some(1), kwargs)?
-            .into_iter()
-            .next())
+        find_first_compat_relative_node(
+            py,
+            &self.document,
+            self.id,
+            RelativeSearch::PreviousElements,
+            name,
+            attrs,
+            string,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "findPrevious", signature = (
@@ -1229,11 +1240,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        find_all_compat_document_order_nodes(
+        find_all_compat_relative_nodes(
             py,
             &self.document,
             self.id,
-            DocumentOrderDirection::Previous,
+            RelativeSearch::PreviousElements,
             name,
             attrs,
             string,
@@ -1296,10 +1307,16 @@ impl Tag {
         string: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        Ok(self
-            .find_parents(py, name, attrs, string, Some(1), kwargs)?
-            .into_iter()
-            .next())
+        find_first_compat_relative_node(
+            py,
+            &self.document,
+            self.id,
+            RelativeSearch::Parents,
+            name,
+            attrs,
+            string,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "findParent", signature = (
@@ -1336,10 +1353,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        find_all_compat_parent_nodes(
+        find_all_compat_relative_nodes(
             py,
             &self.document,
             self.id,
+            RelativeSearch::Parents,
             name,
             attrs,
             string,
@@ -1402,10 +1420,16 @@ impl Tag {
         string: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        Ok(self
-            .find_next_siblings(py, name, attrs, string, Some(1), kwargs)?
-            .into_iter()
-            .next())
+        find_first_compat_relative_node(
+            py,
+            &self.document,
+            self.id,
+            RelativeSearch::NextSiblings,
+            name,
+            attrs,
+            string,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "findNextSibling", signature = (
@@ -1442,11 +1466,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        find_all_compat_sibling_nodes(
+        find_all_compat_relative_nodes(
             py,
             &self.document,
             self.id,
-            SiblingDirection::Next,
+            RelativeSearch::NextSiblings,
             name,
             attrs,
             string,
@@ -1509,10 +1533,16 @@ impl Tag {
         string: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        Ok(self
-            .find_previous_siblings(py, name, attrs, string, Some(1), kwargs)?
-            .into_iter()
-            .next())
+        find_first_compat_relative_node(
+            py,
+            &self.document,
+            self.id,
+            RelativeSearch::PreviousSiblings,
+            name,
+            attrs,
+            string,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "findPreviousSibling", signature = (
@@ -1549,11 +1579,11 @@ impl Tag {
         limit: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        find_all_compat_sibling_nodes(
+        find_all_compat_relative_nodes(
             py,
             &self.document,
             self.id,
-            SiblingDirection::Previous,
+            RelativeSearch::PreviousSiblings,
             name,
             attrs,
             string,

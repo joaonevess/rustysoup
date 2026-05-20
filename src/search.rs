@@ -1,6 +1,6 @@
 use crate::attrs::Attr;
 use crate::dom::{Document, NodeId, NodeType};
-use crate::python::{element_nodes_to_py, node_to_py};
+use crate::python::{element_nodes_to_py, node_to_py, nodes_to_py};
 use crate::shared::{SharedDocument, read_document};
 use crate::tag::Tag;
 use pyo3::IntoPyObjectExt;
@@ -8,17 +8,6 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PySet, PyTuple};
 use std::sync::Arc;
-
-fn nodes_to_py(
-    py: Python<'_>,
-    document: &SharedDocument,
-    nodes: Vec<NodeId>,
-) -> PyResult<Vec<Py<PyAny>>> {
-    nodes
-        .into_iter()
-        .map(|id| node_to_py(py, document, id))
-        .collect()
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn find_all_compat(
@@ -482,87 +471,125 @@ fn find_all_compat_node_ids_in_nodes(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DocumentOrderDirection {
-    Next,
-    Previous,
+pub(crate) enum RelativeSearch {
+    NextElements,
+    PreviousElements,
+    Parents,
+    NextSiblings,
+    PreviousSiblings,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_document_order_nodes(
+pub(crate) fn find_first_compat_relative_node(
     py: Python<'_>,
     document: &SharedDocument,
     id: NodeId,
-    direction: DocumentOrderDirection,
+    axis: RelativeSearch,
+    name: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    Ok(find_all_compat_relative_nodes(
+        py,
+        document,
+        id,
+        axis,
+        name,
+        attrs,
+        string,
+        Some(1),
+        kwargs,
+    )?
+    .into_iter()
+    .next())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_all_compat_relative_nodes(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    axis: RelativeSearch,
     name: Option<&Bound<'_, PyAny>>,
     attrs: Option<&Bound<'_, PyAny>>,
     string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    if let Some(nodes) = try_fast_find_all_document_order(
-        document, id, direction, name, attrs, string, limit, kwargs,
-    )? {
+    match axis {
+        RelativeSearch::NextElements | RelativeSearch::PreviousElements => {
+            find_all_compat_document_order_nodes(
+                py, document, id, axis, name, attrs, string, limit, kwargs,
+            )
+        }
+        RelativeSearch::Parents
+        | RelativeSearch::NextSiblings
+        | RelativeSearch::PreviousSiblings => find_all_compat_relative_stream(
+            py, document, id, axis, name, attrs, string, limit, kwargs,
+        ),
+    }
+}
+
+impl RelativeSearch {
+    fn next_after(self, document: &Document, id: NodeId) -> Option<NodeId> {
+        match self {
+            Self::NextElements => document.next_element_node(id),
+            Self::PreviousElements => document.previous_element_node(id),
+            Self::Parents => document.node(id).parent,
+            Self::NextSiblings => document.node(id).next_sibling,
+            Self::PreviousSiblings => document.node(id).prev_sibling,
+        }
+    }
+
+    fn document_order_nodes(self, document: &Document, id: NodeId) -> Option<Vec<NodeId>> {
+        match self {
+            Self::NextElements => Some(document.next_element_nodes(id)),
+            Self::PreviousElements => Some(document.previous_element_nodes(id)),
+            Self::Parents | Self::NextSiblings | Self::PreviousSiblings => None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_all_compat_document_order_nodes(
+    py: Python<'_>,
+    document: &SharedDocument,
+    id: NodeId,
+    axis: RelativeSearch,
+    name: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'_, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    if let Some(nodes) =
+        try_fast_find_all_document_order(document, id, axis, name, attrs, string, limit, kwargs)?
+    {
         return element_nodes_to_py(py, document, nodes);
     }
 
     if !limit.is_some_and(|value| value > 0) {
         let candidates = {
             let document = read_document(document);
-            match direction {
-                DocumentOrderDirection::Next => document.next_element_nodes(id),
-                DocumentOrderDirection::Previous => document.previous_element_nodes(id),
-            }
+            axis.document_order_nodes(&document, id)
         };
-        let nodes = find_all_compat_node_ids_in_nodes(
-            py, document, candidates, name, attrs, string, limit, kwargs,
-        )?;
-        return nodes_to_py(py, document, nodes);
-    }
-
-    let text_alias = if let Some(kwargs) = kwargs {
-        kwargs.get_item("text")?
-    } else {
-        None
-    };
-    let string = string.or(text_alias.as_ref());
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let name_is_absent = name.is_none_or(|value| value.is_none());
-    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
-    let mut results = Vec::new();
-    let mut candidate = {
-        let document = read_document(document);
-        document_order_neighbor(&document, id, direction)
-    };
-
-    while let Some(current) = candidate {
-        candidate = {
-            let document = read_document(document);
-            document_order_neighbor(&document, current, direction)
-        };
-        if compat_candidate_matches(
-            py,
-            document,
-            current,
-            name,
-            &attr_filters,
-            string,
-            wants_strings,
-        )? {
-            results.push(node_to_py(py, document, current)?);
-        }
-        if limit.is_some_and(|value| value > 0 && results.len() >= value) {
-            break;
+        if let Some(candidates) = candidates {
+            let nodes = find_all_compat_node_ids_in_nodes(
+                py, document, candidates, name, attrs, string, limit, kwargs,
+            )?;
+            return nodes_to_py(py, document, nodes);
         }
     }
 
-    Ok(results)
+    find_all_compat_relative_stream(py, document, id, axis, name, attrs, string, limit, kwargs)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn try_fast_find_all_document_order(
     document: &SharedDocument,
     id: NodeId,
-    direction: DocumentOrderDirection,
+    axis: RelativeSearch,
     name: Option<&Bound<'_, PyAny>>,
     attrs: Option<&Bound<'_, PyAny>>,
     string: Option<&Bound<'_, PyAny>>,
@@ -582,7 +609,7 @@ fn try_fast_find_all_document_order(
 
     let document = read_document(document);
     let mut out = Vec::new();
-    let mut candidate = document_order_neighbor(&document, id, direction);
+    let mut candidate = axis.next_after(&document, id);
     while let Some(current) = candidate {
         if fast_matches(&document, current, &name_filter, &attr_filters) {
             out.push(current);
@@ -590,28 +617,18 @@ fn try_fast_find_all_document_order(
                 break;
             }
         }
-        candidate = document_order_neighbor(&document, current, direction);
+        candidate = axis.next_after(&document, current);
     }
 
     Ok(Some(out))
 }
 
-fn document_order_neighbor(
-    document: &Document,
-    id: NodeId,
-    direction: DocumentOrderDirection,
-) -> Option<NodeId> {
-    match direction {
-        DocumentOrderDirection::Next => document.next_element_node(id),
-        DocumentOrderDirection::Previous => document.previous_element_node(id),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_parent_nodes(
+fn find_all_compat_relative_stream(
     py: Python<'_>,
     document: &SharedDocument,
     id: NodeId,
+    axis: RelativeSearch,
     name: Option<&Bound<'_, PyAny>>,
     attrs: Option<&Bound<'_, PyAny>>,
     string: Option<&Bound<'_, PyAny>>,
@@ -628,74 +645,15 @@ pub(crate) fn find_all_compat_parent_nodes(
     let name_is_absent = name.is_none_or(|value| value.is_none());
     let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
     let mut results = Vec::new();
-    let mut parent = read_document(document).node(id).parent;
-
-    while let Some(current) = parent {
-        parent = read_document(document).node(current).parent;
-        if compat_candidate_matches(
-            py,
-            document,
-            current,
-            name,
-            &attr_filters,
-            string,
-            wants_strings,
-        )? {
-            results.push(node_to_py(py, document, current)?);
-        }
-        if limit.is_some_and(|value| value > 0 && results.len() >= value) {
-            break;
-        }
-    }
-
-    Ok(results)
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum SiblingDirection {
-    Next,
-    Previous,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_sibling_nodes(
-    py: Python<'_>,
-    document: &SharedDocument,
-    id: NodeId,
-    direction: SiblingDirection,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
-    limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<Py<PyAny>>> {
-    let text_alias = if let Some(kwargs) = kwargs {
-        kwargs.get_item("text")?
-    } else {
-        None
-    };
-    let string = string.or(text_alias.as_ref());
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let name_is_absent = name.is_none_or(|value| value.is_none());
-    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
-    let mut results = Vec::new();
-    let mut sibling = {
+    let mut candidate = {
         let document = read_document(document);
-        let node = document.node(id);
-        match direction {
-            SiblingDirection::Next => node.next_sibling,
-            SiblingDirection::Previous => node.prev_sibling,
-        }
+        axis.next_after(&document, id)
     };
 
-    while let Some(current) = sibling {
-        sibling = {
+    while let Some(current) = candidate {
+        candidate = {
             let document = read_document(document);
-            let node = document.node(current);
-            match direction {
-                SiblingDirection::Next => node.next_sibling,
-                SiblingDirection::Previous => node.prev_sibling,
-            }
+            axis.next_after(&document, current)
         };
         if compat_candidate_matches(
             py,

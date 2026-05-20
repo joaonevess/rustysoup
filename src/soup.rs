@@ -3,7 +3,7 @@ use crate::errors::internal_panic;
 use crate::matcher::{self, FindCriteria};
 use crate::parser::{parse_html, parse_html_document};
 use crate::python::{
-    node_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
+    node_to_py, nodes_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
     render_outer_html_with_py_formatter_and_encoding, render_prettify_with_py_formatter,
 };
 use crate::search::{
@@ -243,7 +243,7 @@ impl Soup {
             let document = read_document(&self.document);
             document.child_nodes(document.root)
         };
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[getter]
@@ -262,7 +262,7 @@ impl Soup {
             let document = read_document(&self.document);
             document.descendant_nodes(document.root, false)
         };
-        nodes_to_py_public(py, &self.document, nodes)
+        nodes_to_py(py, &self.document, nodes)
     }
 
     #[pyo3(name = "recursiveChildGenerator")]
@@ -393,7 +393,7 @@ impl Soup {
     #[getter]
     fn strings(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let root = read_document(&self.document).root;
-        nodes_to_py_public(
+        nodes_to_py(
             py,
             &self.document,
             collect_string_nodes(&self.document, root),
@@ -2134,17 +2134,6 @@ fn parse_regex_matcher(value: &Bound<'_, PyAny>) -> PyResult<Regex> {
     };
     Regex::new(&pattern)
         .map_err(|err| PyValueError::new_err(format!("invalid SoupStrainer regex: {err}")))
-}
-
-pub(crate) fn nodes_to_py_public(
-    py: Python<'_>,
-    document: &SharedDocument,
-    nodes: Vec<NodeId>,
-) -> PyResult<Vec<Py<PyAny>>> {
-    nodes
-        .into_iter()
-        .map(|id| node_to_py(py, document, id))
-        .collect()
 }
 
 pub(crate) fn append_nodes_to_py_list(
