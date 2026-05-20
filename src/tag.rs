@@ -4,13 +4,15 @@ use crate::python::{
     node_to_py, py_encode_string, render_inner_html_with_py_formatter_and_encoding,
     render_outer_html_with_py_formatter_and_encoding, render_prettify_with_py_formatter,
 };
+use crate::search::{
+    DocumentOrderDirection, SiblingDirection, find_all_compat,
+    find_all_compat_document_order_nodes, find_all_compat_node_ids, find_all_compat_parent_nodes,
+    find_all_compat_sibling_nodes, find_first_compat, try_fast_find_all_into_py_list,
+};
 use crate::shared::{SharedDocument, read_document, write_document};
 use crate::soup::{
-    DocumentOrderDirection, SiblingDirection, append_nodes_to_py_list, collect_string_nodes,
-    collect_string_values, find_all_compat, find_all_compat_document_order_nodes,
-    find_all_compat_node_ids, find_all_compat_parent_nodes, find_all_compat_sibling_nodes,
-    find_first_compat, nodes_to_py_public, select_all_detached, text_type_selection_from_call,
-    try_fast_find_all_into_py_list,
+    append_nodes_to_py_list, collect_string_nodes, collect_string_values, nodes_to_py_public,
+    select_all_detached, text_type_selection_from_call,
 };
 use crate::string::NavigableString;
 use pyo3::IntoPyObjectExt;

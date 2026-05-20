@@ -4,6 +4,7 @@ mod errors;
 mod matcher;
 mod parser;
 mod python;
+mod search;
 mod selectors;
 mod shared;
 mod soup;

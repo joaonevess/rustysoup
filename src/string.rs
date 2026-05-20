@@ -1,10 +1,10 @@
 use crate::dom::{NodeId, NodeType};
 use crate::python::node_to_py;
-use crate::shared::{SharedDocument, read_document, write_document};
-use crate::soup::{
+use crate::search::{
     DocumentOrderDirection, SiblingDirection, find_all_compat_document_order_nodes,
     find_all_compat_parent_nodes, find_all_compat_sibling_nodes,
 };
+use crate::shared::{SharedDocument, read_document, write_document};
 use crate::tag::{
     Tag, extract_rustysoup_string, insert_string_after, insert_string_before, insert_tag_after,
     insert_tag_before,
