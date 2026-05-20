@@ -1453,9 +1453,7 @@ pub(crate) fn find_first_compat(
     string: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if let Some(id) =
-        try_fast_find_first(py, document, root, name, attrs, recursive, string, kwargs)?
-    {
+    if let Some(id) = try_fast_find_first(document, root, name, attrs, recursive, string, kwargs)? {
         return id
             .map(|id| Tag::new(Arc::clone(document), id).into_py_any(py))
             .transpose();
@@ -1489,7 +1487,7 @@ pub(crate) fn find_all_compat_node_ids(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<NodeId>> {
     if let Some(results) = try_fast_find_all(
-        py, document, root, name, attrs, recursive, string, limit, kwargs,
+        document, root, name, attrs, recursive, string, limit, kwargs,
     )? {
         return Ok(results);
     }
@@ -1532,7 +1530,6 @@ pub(crate) fn find_all_compat_node_ids(
 
 #[allow(clippy::too_many_arguments)]
 fn try_fast_find_all(
-    py: Python<'_>,
     document: &SharedDocument,
     root: NodeId,
     name: Option<&Bound<'_, PyAny>>,
@@ -1549,7 +1546,7 @@ fn try_fast_find_all(
         return Ok(None);
     };
     let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(py, &attr_filters)? else {
+    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
         return Ok(None);
     };
 
@@ -1586,7 +1583,6 @@ fn try_fast_find_all(
 
 #[allow(clippy::too_many_arguments)]
 fn try_fast_find_first(
-    py: Python<'_>,
     document: &SharedDocument,
     root: NodeId,
     name: Option<&Bound<'_, PyAny>>,
@@ -1602,7 +1598,7 @@ fn try_fast_find_first(
         return Ok(None);
     };
     let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(py, &attr_filters)? else {
+    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
         return Ok(None);
     };
 
@@ -1647,7 +1643,7 @@ pub(crate) fn try_fast_find_all_into_py_list(
         return Ok(false);
     };
     let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(py, &attr_filters)? else {
+    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
         return Ok(false);
     };
 
@@ -1787,10 +1783,7 @@ enum SimpleAttrFilter {
 }
 
 impl SimpleAttrFilter {
-    fn from_filters(
-        _py: Python<'_>,
-        filters: &[(String, Bound<'_, PyAny>)],
-    ) -> PyResult<Option<Vec<Self>>> {
+    fn from_filters(filters: &[(String, Bound<'_, PyAny>)]) -> PyResult<Option<Vec<Self>>> {
         let mut out = Vec::with_capacity(filters.len());
         for (name, filter) in filters {
             if filter.is_none() {
@@ -1911,7 +1904,7 @@ pub(crate) fn find_all_compat_document_order_nodes(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     if let Some(nodes) = try_fast_find_all_document_order(
-        py, document, id, direction, name, attrs, string, limit, kwargs,
+        document, id, direction, name, attrs, string, limit, kwargs,
     )? {
         return crate::python::element_nodes_to_py(py, document, nodes);
     }
@@ -1971,7 +1964,6 @@ pub(crate) fn find_all_compat_document_order_nodes(
 
 #[allow(clippy::too_many_arguments)]
 fn try_fast_find_all_document_order(
-    py: Python<'_>,
     document: &SharedDocument,
     id: NodeId,
     direction: DocumentOrderDirection,
@@ -1988,7 +1980,7 @@ fn try_fast_find_all_document_order(
         return Ok(None);
     };
     let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(py, &attr_filters)? else {
+    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
         return Ok(None);
     };
 
