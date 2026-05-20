@@ -379,6 +379,25 @@ def test_self_mutation_guards_match_bs4_and_preserve_tree():
     assert str(rusty) == str(bs4)
 
 
+def test_ancestor_mutation_guards_prevent_cycles_and_preserve_tree():
+    cases = [
+        lambda soup: soup.p.append(soup.div),
+        lambda soup: soup.p.insert(0, soup.div),
+        lambda soup: soup.p.insert_before(soup.div),
+        lambda soup: soup.p.insert_after(soup.div),
+        lambda soup: soup.p.replace_with(soup.div),
+        lambda soup: soup.p.wrap(soup.div),
+        lambda soup: soup.p.string.wrap(soup.p),
+    ]
+
+    for mutate in cases:
+        rusty = BeautifulSoup("<div><p>one</p></div>", "html.parser")
+        with pytest.raises(ValueError) as error:
+            mutate(rusty)
+        assert str(error.value) == "Cannot insert a tag into itself."
+        assert str(rusty) == "<div><p>one</p></div>"
+
+
 def test_negative_insert_index_errors_match_bs4():
     rusty = BeautifulSoup("<p>ab</p>", "html.parser")
     bs4 = Bs4BeautifulSoup("<p>ab</p>", "html.parser")

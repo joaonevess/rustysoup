@@ -1619,3 +1619,220 @@ fn escape_attr(input: &str, out: &mut String) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn element(name: &'static str) -> Node {
+        Node::new(NodeType::Element(ElementData {
+            local_name: LocalName::from(Cow::Borrowed(name)),
+            attrs: Vec::new().into_boxed_slice(),
+        }))
+    }
+
+    fn push_element(document: &mut Document, name: &'static str) -> NodeId {
+        let id = NodeId::new(document.nodes.len());
+        document.nodes.push(element(name));
+        id
+    }
+
+    fn assert_valid_id(document: &Document, id: NodeId, field: &str) {
+        assert!(
+            id.index() < document.nodes.len(),
+            "{field} points outside the document"
+        );
+    }
+
+    fn assert_dom_invariants(document: &Document) {
+        assert_valid_id(document, document.root, "root");
+
+        let len = document.nodes.len();
+        let mut child_memberships = vec![0usize; len];
+
+        for parent_index in 0..len {
+            let parent_id = NodeId::new(parent_index);
+            let parent = document.node(parent_id);
+            match (parent.first_child, parent.last_child) {
+                (None, None) | (Some(_), Some(_)) => {}
+                _ => panic!("first_child and last_child must be set together"),
+            }
+
+            let mut chain_seen = vec![false; len];
+            let mut previous = None;
+            let mut current = parent.first_child;
+            let mut last = None;
+            let mut steps = 0;
+
+            while let Some(child_id) = current {
+                assert_valid_id(document, child_id, "child");
+                assert!(steps < len, "child chain contains a cycle");
+
+                let child_index = child_id.index();
+                assert!(
+                    !chain_seen[child_index],
+                    "child appears twice in one child chain"
+                );
+                chain_seen[child_index] = true;
+                child_memberships[child_index] += 1;
+
+                let child = document.node(child_id);
+                assert_eq!(child.parent, Some(parent_id), "child parent mismatch");
+                assert_eq!(child.prev_sibling, previous, "previous sibling mismatch");
+
+                if let Some(previous_id) = previous {
+                    assert_eq!(
+                        document.node(previous_id).next_sibling,
+                        Some(child_id),
+                        "previous sibling does not point forward"
+                    );
+                }
+
+                previous = Some(child_id);
+                last = Some(child_id);
+                current = child.next_sibling;
+                steps += 1;
+            }
+
+            assert_eq!(parent.last_child, last, "last_child mismatch");
+        }
+
+        for (index, child_membership) in child_memberships.iter().copied().enumerate() {
+            let id = NodeId::new(index);
+            let node = document.node(id);
+
+            for (field, linked) in [
+                ("parent", node.parent),
+                ("first_child", node.first_child),
+                ("last_child", node.last_child),
+                ("prev_sibling", node.prev_sibling),
+                ("next_sibling", node.next_sibling),
+            ] {
+                if let Some(linked_id) = linked {
+                    assert_valid_id(document, linked_id, field);
+                }
+            }
+
+            if let Some(parent_id) = node.parent {
+                assert_valid_id(document, parent_id, "parent");
+                assert_eq!(
+                    child_membership, 1,
+                    "node with a parent must appear exactly once in that parent's child chain"
+                );
+            } else {
+                assert_eq!(
+                    child_membership, 0,
+                    "parentless node must not appear in any child chain"
+                );
+                assert_eq!(node.prev_sibling, None, "detached node has prev_sibling");
+                assert_eq!(node.next_sibling, None, "detached node has next_sibling");
+            }
+
+            if let Some(first_child) = node.first_child {
+                assert_eq!(
+                    document.node(first_child).prev_sibling,
+                    None,
+                    "first child has prev_sibling"
+                );
+            }
+            if let Some(last_child) = node.last_child {
+                assert_eq!(
+                    document.node(last_child).next_sibling,
+                    None,
+                    "last child has next_sibling"
+                );
+            }
+        }
+    }
+
+    fn child_texts(document: &Document, parent: NodeId) -> Vec<String> {
+        document
+            .child_nodes(parent)
+            .into_iter()
+            .map(|id| match &document.node(id).node_type {
+                NodeType::Text(text) => text.to_string(),
+                NodeType::Element(element) => format!("<{}>", element.tag_name()),
+                _ => "?".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn insertion_targets_preserve_links_when_reordering_existing_nodes() {
+        let mut document = Document::empty();
+        let root = document.root;
+
+        let a = document.insert_text_at(InsertTarget::AppendTo(root), "a".to_string());
+        let b = document.insert_text_at(InsertTarget::AppendTo(root), "b".to_string());
+        let c = document.insert_text_at(InsertTarget::AppendTo(root), "c".to_string());
+
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["a", "b", "c"]);
+
+        document.insert_existing_at(
+            InsertTarget::AtIndex {
+                parent: root,
+                index: 0,
+            },
+            c,
+        );
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["c", "a", "b"]);
+
+        document.insert_existing_at(InsertTarget::After(b), c);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["a", "b", "c"]);
+
+        document.insert_existing_at(InsertTarget::Before(b), c);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["a", "c", "b"]);
+
+        document.detach(a);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["c", "b"]);
+        assert_eq!(document.node(a).parent, None);
+        assert_eq!(document.node(a).prev_sibling, None);
+        assert_eq!(document.node(a).next_sibling, None);
+
+        document.insert_existing_at(InsertTarget::AppendTo(root), a);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn clone_unwrap_decompose_and_smooth_preserve_links() {
+        let mut source = Document::empty();
+        let source_section = push_element(&mut source, "section");
+        let source_bold = push_element(&mut source, "b");
+        source.append_existing(source.root, source_section);
+        source.insert_text_at(InsertTarget::AppendTo(source_section), "one".to_string());
+        source.append_existing(source_section, source_bold);
+        source.insert_text_at(InsertTarget::AppendTo(source_bold), "two".to_string());
+        assert_dom_invariants(&source);
+
+        let mut document = Document::empty();
+        let root = document.root;
+        let section =
+            document.insert_clone_at(InsertTarget::AppendTo(root), &source, source_section);
+        assert_dom_invariants(&document);
+        assert_eq!(document.text(section, "", false), "onetwo");
+
+        document.unwrap_node(section);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["one", "<b>"]);
+
+        let first_child = document.node(root).first_child.expect("root has children");
+        document.decompose_node(first_child);
+        assert_dom_invariants(&document);
+        assert_eq!(child_texts(&document, root), ["<b>"]);
+
+        document.insert_text_at(InsertTarget::AppendTo(root), "x".to_string());
+        document.insert_text_at(InsertTarget::AppendTo(root), "y".to_string());
+        assert_dom_invariants(&document);
+
+        document.smooth_text_nodes(root);
+        assert_dom_invariants(&document);
+        assert_eq!(document.text(root, "", false), "twoxy");
+        assert_eq!(child_texts(&document, root), ["<b>", "xy"]);
+    }
+}
