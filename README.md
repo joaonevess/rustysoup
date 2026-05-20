@@ -137,14 +137,17 @@ maturin develop
 pytest
 ```
 
-Release checks:
+Recommended local hook:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-maturin develop --release
-pytest
+git config core.hooksPath .githooks
+```
+
+CI checks:
+
+```bash
+./ci/check.sh rust
+./ci/check.sh all
 ```
 
 ## Status

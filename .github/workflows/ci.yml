@@ -22,12 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: cargo fmt
-        run: cargo fmt --check
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test --all-features
+      - name: Rust checks
+        run: ./ci/check.sh rust
 
   python:
     name: Python ${{ matrix.python-version }}

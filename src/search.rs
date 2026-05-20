@@ -569,7 +569,7 @@ fn find_all_compat_document_order_nodes(
         return element_nodes_to_py(py, document, nodes);
     }
 
-    if !limit.is_some_and(|value| value > 0) {
+    if limit.is_none_or(|value| value == 0) {
         let candidates = {
             let document = read_document(document);
             axis.document_order_nodes(&document, id)
