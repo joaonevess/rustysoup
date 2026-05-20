@@ -1913,7 +1913,7 @@ pub(crate) fn find_all_compat_document_order_nodes(
     if let Some(nodes) = try_fast_find_all_document_order(
         py, document, id, direction, name, attrs, string, limit, kwargs,
     )? {
-        return nodes_to_py_public(py, document, nodes);
+        return crate::python::element_nodes_to_py(py, document, nodes);
     }
 
     if !limit.is_some_and(|value| value > 0) {

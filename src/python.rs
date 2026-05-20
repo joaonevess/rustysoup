@@ -63,6 +63,17 @@ pub(crate) fn node_to_py(
     }
 }
 
+pub(crate) fn element_nodes_to_py(
+    py: Python<'_>,
+    document: &SharedDocument,
+    nodes: Vec<NodeId>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    nodes
+        .into_iter()
+        .map(|id| Tag::new(Arc::clone(document), id).into_py_any(py))
+        .collect()
+}
+
 fn rustysoup_class<'py>(
     py: Python<'py>,
     cell: &'static PyOnceLock<Py<PyAny>>,
