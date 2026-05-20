@@ -9,83 +9,151 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PySet, PyTuple};
 use std::sync::Arc;
 
+struct FindQuery<'py> {
+    name: Option<Bound<'py, PyAny>>,
+    string: Option<Bound<'py, PyAny>>,
+    attr_filters: Vec<(String, Bound<'py, PyAny>)>,
+    wants_strings: bool,
+}
+
+impl<'py> FindQuery<'py> {
+    fn new(
+        name: Option<&Bound<'py, PyAny>>,
+        attrs: Option<&Bound<'py, PyAny>>,
+        string: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Self> {
+        let name = name.cloned();
+        let string = match string {
+            Some(value) => Some(value.clone()),
+            None => kwargs
+                .map(|kwargs| kwargs.get_item("text"))
+                .transpose()?
+                .flatten(),
+        };
+        let attr_filters = collect_attr_filters(attrs, kwargs)?;
+        let name_is_absent = name.as_ref().is_none_or(|value| value.is_none());
+        let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
+        Ok(Self {
+            name,
+            string,
+            attr_filters,
+            wants_strings,
+        })
+    }
+
+    fn name(&self) -> Option<&Bound<'py, PyAny>> {
+        self.name.as_ref()
+    }
+
+    fn string(&self) -> Option<&Bound<'py, PyAny>> {
+        self.string.as_ref()
+    }
+
+    fn attr_filters(&self) -> &[(String, Bound<'py, PyAny>)] {
+        &self.attr_filters
+    }
+
+    fn wants_strings(&self) -> bool {
+        self.wants_strings
+    }
+
+    fn simple_filters(&self) -> PyResult<Option<(SimpleNameFilter, Vec<SimpleAttrFilter>)>> {
+        if self.string.is_some() {
+            return Ok(None);
+        }
+        let Some(name_filter) = SimpleNameFilter::from_py(self.name())? else {
+            return Ok(None);
+        };
+        let Some(attr_filters) = SimpleAttrFilter::from_filters(self.attr_filters())? else {
+            return Ok(None);
+        };
+        Ok(Some((name_filter, attr_filters)))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat(
-    py: Python<'_>,
+pub(crate) fn find_all_compat<'py>(
+    py: Python<'py>,
     document: &SharedDocument,
     root: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'py, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    let nodes = find_all_compat_node_ids(
-        py, document, root, name, attrs, recursive, string, limit, kwargs,
-    )?;
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    let nodes = find_all_compat_node_ids_with_query(py, document, root, recursive, limit, &query)?;
     nodes_to_py(py, document, nodes)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_first_compat(
-    py: Python<'_>,
+pub(crate) fn find_first_compat<'py>(
+    py: Python<'py>,
     document: &SharedDocument,
     root: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    string: Option<&Bound<'py, PyAny>>,
+    kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if let Some(id) = try_fast_find_first(document, root, name, attrs, recursive, string, kwargs)? {
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    if let Some(id) = try_fast_find_first(document, root, recursive, &query)? {
         return id
             .map(|id| Tag::new(Arc::clone(document), id).into_py_any(py))
             .transpose();
     }
 
-    Ok(find_all_compat(
-        py,
-        document,
-        root,
-        name,
-        attrs,
-        recursive,
-        string,
-        Some(1),
-        kwargs,
-    )?
-    .into_iter()
-    .next())
+    Ok(
+        find_all_compat_with_query(py, document, root, recursive, Some(1), &query)?
+            .into_iter()
+            .next(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_node_ids(
+pub(crate) fn find_all_compat_node_ids<'py>(
+    py: Python<'py>,
+    document: &SharedDocument,
+    root: NodeId,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
+    recursive: bool,
+    string: Option<&Bound<'py, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Vec<NodeId>> {
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    find_all_compat_node_ids_with_query(py, document, root, recursive, limit, &query)
+}
+
+fn find_all_compat_with_query(
     py: Python<'_>,
     document: &SharedDocument,
     root: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let nodes = find_all_compat_node_ids_with_query(py, document, root, recursive, limit, query)?;
+    nodes_to_py(py, document, nodes)
+}
+
+fn find_all_compat_node_ids_with_query(
+    py: Python<'_>,
+    document: &SharedDocument,
+    root: NodeId,
+    recursive: bool,
+    limit: Option<usize>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Vec<NodeId>> {
-    if let Some(results) = try_fast_find_all(
-        document, root, name, attrs, recursive, string, limit, kwargs,
-    )? {
+    if let Some(results) = try_fast_find_all(document, root, recursive, limit, query)? {
         return Ok(results);
     }
 
-    let text_alias = if let Some(kwargs) = kwargs {
-        kwargs.get_item("text")?
-    } else {
-        None
-    };
-    let string = string.or(text_alias.as_ref());
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let name_is_absent = name.is_none_or(|value| value.is_none());
-    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
     let mut results = Vec::new();
     let mut current = {
         let document = read_document(document);
@@ -101,7 +169,7 @@ pub(crate) fn find_all_compat_node_ids(
                 document.node(id).next_sibling
             }
         };
-        if compat_candidate_matches(py, document, id, name, &attr_filters, string, wants_strings)? {
+        if compat_candidate_matches(py, document, id, query)? {
             results.push(id);
         }
         if limit.is_some_and(|value| value > 0 && results.len() >= value) {
@@ -117,21 +185,11 @@ pub(crate) fn find_all_compat_node_ids(
 fn try_fast_find_all(
     document: &SharedDocument,
     root: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Option<Vec<NodeId>>> {
-    if string.is_some() || kwargs_has_key(kwargs, "text")? {
-        return Ok(None);
-    }
-    let Some(name_filter) = SimpleNameFilter::from_py(name)? else {
-        return Ok(None);
-    };
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
+    let Some((name_filter, attr_filters)) = query.simple_filters()? else {
         return Ok(None);
     };
 
@@ -170,20 +228,10 @@ fn try_fast_find_all(
 fn try_fast_find_first(
     document: &SharedDocument,
     root: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Option<Option<NodeId>>> {
-    if string.is_some() || kwargs_has_key(kwargs, "text")? {
-        return Ok(None);
-    }
-    let Some(name_filter) = SimpleNameFilter::from_py(name)? else {
-        return Ok(None);
-    };
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
+    let Some((name_filter, attr_filters)) = query.simple_filters()? else {
         return Ok(None);
     };
 
@@ -209,26 +257,20 @@ fn try_fast_find_first(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_fast_find_all_into_py_list(
-    py: Python<'_>,
+pub(crate) fn try_fast_find_all_into_py_list<'py>(
+    py: Python<'py>,
     document: &SharedDocument,
     root: NodeId,
-    out: &Bound<'_, PyAny>,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
+    out: &Bound<'py, PyAny>,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
     recursive: bool,
-    string: Option<&Bound<'_, PyAny>>,
+    string: Option<&Bound<'py, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<bool> {
-    if string.is_some() || kwargs_has_key(kwargs, "text")? {
-        return Ok(false);
-    }
-    let Some(name_filter) = SimpleNameFilter::from_py(name)? else {
-        return Ok(false);
-    };
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    let Some((name_filter, attr_filters)) = query.simple_filters()? else {
         return Ok(false);
     };
 
@@ -428,37 +470,18 @@ fn attr_value<'a>(attrs: &'a [Attr], name: &str) -> Option<Option<&'a str>> {
         .map(|attr| attr.value.as_deref())
 }
 
-fn kwargs_has_key(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<bool> {
-    Ok(kwargs
-        .map(|kwargs| kwargs.contains(key))
-        .transpose()?
-        .unwrap_or(false))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn find_all_compat_node_ids_in_nodes(
     py: Python<'_>,
     document: &SharedDocument,
     candidates: Vec<NodeId>,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Vec<NodeId>> {
-    let text_alias = if let Some(kwargs) = kwargs {
-        kwargs.get_item("text")?
-    } else {
-        None
-    };
-    let string = string.or(text_alias.as_ref());
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let name_is_absent = name.is_none_or(|value| value.is_none());
-    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
     let mut results = Vec::new();
 
     for id in candidates {
-        if compat_candidate_matches(py, document, id, name, &attr_filters, string, wants_strings)? {
+        if compat_candidate_matches(py, document, id, query)? {
             results.push(id);
         }
 
@@ -480,54 +503,57 @@ pub(crate) enum RelativeSearch {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_first_compat_relative_node(
-    py: Python<'_>,
+pub(crate) fn find_first_compat_relative_node<'py>(
+    py: Python<'py>,
     document: &SharedDocument,
     id: NodeId,
     axis: RelativeSearch,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
+    string: Option<&Bound<'py, PyAny>>,
+    kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    Ok(find_all_compat_relative_nodes(
-        py,
-        document,
-        id,
-        axis,
-        name,
-        attrs,
-        string,
-        Some(1),
-        kwargs,
-    )?
-    .into_iter()
-    .next())
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    Ok(
+        find_all_compat_relative_nodes_with_query(py, document, id, axis, Some(1), &query)?
+            .into_iter()
+            .next(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn find_all_compat_relative_nodes(
+pub(crate) fn find_all_compat_relative_nodes<'py>(
+    py: Python<'py>,
+    document: &SharedDocument,
+    id: NodeId,
+    axis: RelativeSearch,
+    name: Option<&Bound<'py, PyAny>>,
+    attrs: Option<&Bound<'py, PyAny>>,
+    string: Option<&Bound<'py, PyAny>>,
+    limit: Option<usize>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let query = FindQuery::new(name, attrs, string, kwargs)?;
+    find_all_compat_relative_nodes_with_query(py, document, id, axis, limit, &query)
+}
+
+fn find_all_compat_relative_nodes_with_query(
     py: Python<'_>,
     document: &SharedDocument,
     id: NodeId,
     axis: RelativeSearch,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     match axis {
         RelativeSearch::NextElements | RelativeSearch::PreviousElements => {
-            find_all_compat_document_order_nodes(
-                py, document, id, axis, name, attrs, string, limit, kwargs,
-            )
+            find_all_compat_document_order_nodes(py, document, id, axis, limit, query)
         }
         RelativeSearch::Parents
         | RelativeSearch::NextSiblings
-        | RelativeSearch::PreviousSiblings => find_all_compat_relative_stream(
-            py, document, id, axis, name, attrs, string, limit, kwargs,
-        ),
+        | RelativeSearch::PreviousSiblings => {
+            find_all_compat_relative_stream(py, document, id, axis, limit, query)
+        }
     }
 }
 
@@ -557,15 +583,10 @@ fn find_all_compat_document_order_nodes(
     document: &SharedDocument,
     id: NodeId,
     axis: RelativeSearch,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    if let Some(nodes) =
-        try_fast_find_all_document_order(document, id, axis, name, attrs, string, limit, kwargs)?
-    {
+    if let Some(nodes) = try_fast_find_all_document_order(document, id, axis, limit, query)? {
         return element_nodes_to_py(py, document, nodes);
     }
 
@@ -575,14 +596,12 @@ fn find_all_compat_document_order_nodes(
             axis.document_order_nodes(&document, id)
         };
         if let Some(candidates) = candidates {
-            let nodes = find_all_compat_node_ids_in_nodes(
-                py, document, candidates, name, attrs, string, limit, kwargs,
-            )?;
+            let nodes = find_all_compat_node_ids_in_nodes(py, document, candidates, limit, query)?;
             return nodes_to_py(py, document, nodes);
         }
     }
 
-    find_all_compat_relative_stream(py, document, id, axis, name, attrs, string, limit, kwargs)
+    find_all_compat_relative_stream(py, document, id, axis, limit, query)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -590,20 +609,10 @@ fn try_fast_find_all_document_order(
     document: &SharedDocument,
     id: NodeId,
     axis: RelativeSearch,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Option<Vec<NodeId>>> {
-    if string.is_some() || kwargs_has_key(kwargs, "text")? {
-        return Ok(None);
-    }
-    let Some(name_filter) = SimpleNameFilter::from_py(name)? else {
-        return Ok(None);
-    };
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let Some(attr_filters) = SimpleAttrFilter::from_filters(&attr_filters)? else {
+    let Some((name_filter, attr_filters)) = query.simple_filters()? else {
         return Ok(None);
     };
 
@@ -629,21 +638,9 @@ fn find_all_compat_relative_stream(
     document: &SharedDocument,
     id: NodeId,
     axis: RelativeSearch,
-    name: Option<&Bound<'_, PyAny>>,
-    attrs: Option<&Bound<'_, PyAny>>,
-    string: Option<&Bound<'_, PyAny>>,
     limit: Option<usize>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    query: &FindQuery<'_>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    let text_alias = if let Some(kwargs) = kwargs {
-        kwargs.get_item("text")?
-    } else {
-        None
-    };
-    let string = string.or(text_alias.as_ref());
-    let attr_filters = collect_attr_filters(attrs, kwargs)?;
-    let name_is_absent = name.is_none_or(|value| value.is_none());
-    let wants_strings = name_is_absent && string.is_some() && attr_filters.is_empty();
     let mut results = Vec::new();
     let mut candidate = {
         let document = read_document(document);
@@ -655,15 +652,7 @@ fn find_all_compat_relative_stream(
             let document = read_document(document);
             axis.next_after(&document, current)
         };
-        if compat_candidate_matches(
-            py,
-            document,
-            current,
-            name,
-            &attr_filters,
-            string,
-            wants_strings,
-        )? {
+        if compat_candidate_matches(py, document, current, query)? {
             results.push(node_to_py(py, document, current)?);
         }
         if limit.is_some_and(|value| value > 0 && results.len() >= value) {
@@ -678,26 +667,23 @@ fn compat_candidate_matches(
     py: Python<'_>,
     document: &SharedDocument,
     id: NodeId,
-    name: Option<&Bound<'_, PyAny>>,
-    attr_filters: &[(String, Bound<'_, PyAny>)],
-    string: Option<&Bound<'_, PyAny>>,
-    wants_strings: bool,
+    query: &FindQuery<'_>,
 ) -> PyResult<bool> {
     let is_matchable_node = {
         let document = read_document(document);
         document.is_element(id) || matches!(document.node(id).node_type, NodeType::Document)
     };
     if is_matchable_node {
-        if wants_strings {
+        if query.wants_strings() {
             return Ok(false);
         }
-        if !matches_name_filter(name, document, id)? {
+        if !matches_name_filter(query.name(), document, id)? {
             return Ok(false);
         }
-        if !matches_attr_filters(py, document, id, attr_filters)? {
+        if !matches_attr_filters(py, document, id, query.attr_filters())? {
             return Ok(false);
         }
-        if let Some(string_filter) = string {
+        if let Some(string_filter) = query.string() {
             let (string_id, value) = {
                 let document = read_document(document);
                 let Some(string_id) = document.tag_string_node(id) else {
@@ -715,7 +701,7 @@ fn compat_candidate_matches(
         return Ok(true);
     }
 
-    if wants_strings {
+    if query.wants_strings() {
         let value = {
             let document = read_document(document);
             if !document.is_text_like(id) {
@@ -726,7 +712,7 @@ fn compat_candidate_matches(
             };
             value.to_string()
         };
-        if let Some(string_filter) = string
+        if let Some(string_filter) = query.string()
             && matches_string_node_filter(py, document, id, Some(&value), string_filter)?
         {
             return Ok(true);
