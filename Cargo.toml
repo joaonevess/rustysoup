@@ -2,7 +2,7 @@
 name = "rustysoup"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 description = "Fast HTML parsing for Python with BeautifulSoup-style ergonomics."
 repository = "https://github.com/joaonevess/rustysoup"
